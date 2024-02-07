@@ -64,7 +64,7 @@ fn handle_client(mut stream: TcpStream) {
                                         .unwrap()
                                         .as_millis() as usize
                             {
-                                let _write_result = stream.write_all(b"+(nil)\r\n");
+                                let _write_result = stream.write_all(b"$-1\r\n");
                             } else {
                                 let length = resp.len();
                                 let _write_result = stream.write_all(
@@ -80,7 +80,7 @@ fn handle_client(mut stream: TcpStream) {
                                 );
                             }
                         } else {
-                            let _write_result = stream.write_all(b"+(nil)\r\n");
+                            let _write_result = stream.write_all(b"$-1\r\n");
                         }
                     }
                 } else if operator_num == 3 {
