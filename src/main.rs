@@ -28,8 +28,13 @@ fn main() {
 
 fn handle_client(mut stream: TcpStream) {
     let mut read_buf: [u8; 256] = [0; 256];
+    let echo_tag = b"ECHO";
     loop {
         let _read_result = stream.read(&mut read_buf).expect("Cannot read from stream");
-        let _write_result = stream.write_all(b"+PONG\r\n");
+        if &read_buf[8..12] == echo_tag {
+            let _write_result = stream.write_all(&read_buf[18..]);
+        } else {
+            let _write_result = stream.write_all(b"+PONG\r\n");
+        }
     }
 }
