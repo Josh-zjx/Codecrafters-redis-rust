@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
 
 fn main() {
