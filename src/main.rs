@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
     println!("Logs from your program will appear here!");
@@ -26,10 +27,14 @@ fn main() {
         let _ = handler.join();
     }
 }
+pub struct Item {
+    pub value: String,
+    pub expire: usize,
+}
 
 fn handle_client(mut stream: TcpStream) {
     let mut read_buf: [u8; 256];
-    let mut storage = BTreeMap::<String, String>::new();
+    let mut storage = BTreeMap::<String, Item>::new();
 
     loop {
         read_buf = [0; 256];
@@ -50,26 +55,58 @@ fn handle_client(mut stream: TcpStream) {
                         let _write_result = stream.write_all(b"+PONG\r\n");
                     } else if params[2].as_bytes() == b"GET" || params[2].as_bytes() == b"get" {
                         if storage.contains_key(params[4]) {
-                            let resp = storage.get(params[4]).unwrap();
-                            let length = resp.len();
-                            let _write_result = stream.write_all(
-                                [
-                                    "$",
-                                    &length.to_string() as &str,
-                                    "\r\n",
-                                    &resp as &str,
-                                    "\r\n",
-                                ]
-                                .concat()
-                                .as_bytes(),
-                            );
+                            let resp = &storage.get(params[4]).unwrap().value;
+                            let exp = storage.get(params[4]).unwrap().expire;
+                            if exp != 0
+                                && exp
+                                    < SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_millis() as usize
+                            {
+                                let _write_result = stream.write_all(b"+(nil)\r\n");
+                            } else {
+                                let length = resp.len();
+                                let _write_result = stream.write_all(
+                                    [
+                                        "$",
+                                        &length.to_string() as &str,
+                                        "\r\n",
+                                        &resp as &str,
+                                        "\r\n",
+                                    ]
+                                    .concat()
+                                    .as_bytes(),
+                                );
+                            }
                         } else {
                             let _write_result = stream.write_all(b"+(nil)\r\n");
                         }
                     }
                 } else if operator_num == 3 {
                     if params[2].as_bytes() == b"SET" || params[2].as_bytes() == b"set" {
-                        storage.insert(params[4].to_string(), params[6].to_string());
+                        storage.insert(
+                            params[4].to_string(),
+                            Item {
+                                value: params[6].to_string(),
+                                expire: 0,
+                            },
+                        );
+                        let _write_result = stream.write_all(b"+OK\r\n");
+                    }
+                } else if operator_num == 5 {
+                    if params[2].as_bytes() == b"SET" || params[2].as_bytes() == b"set" {
+                        storage.insert(
+                            params[4].to_string(),
+                            Item {
+                                value: params[6].to_string(),
+                                expire: SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis() as usize
+                                    + params[10].parse::<usize>().unwrap(),
+                            },
+                        );
                         let _write_result = stream.write_all(b"+OK\r\n");
                     }
                 } else {
