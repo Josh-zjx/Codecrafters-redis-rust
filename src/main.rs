@@ -30,11 +30,22 @@ fn handle_client(mut stream: TcpStream) {
     let mut read_buf: [u8; 256] = [0; 256];
     let echo_tag = b"ECHO";
     loop {
-        let _read_result = stream.read(&mut read_buf).expect("Cannot read from stream");
-        if &read_buf[8..12] == echo_tag {
-            let _write_result = stream.write_all(&read_buf[18..]);
-        } else {
-            let _write_result = stream.write_all(b"+PONG\r\n");
-        }
+        read_buf = [0; 256];
+        let read_result = stream.read(&mut read_buf);
+        let size = match read_result {
+            Ok(length) => {
+                if length == 0 {
+                    continue;
+                }
+                if &read_buf[8..12] == echo_tag {
+                    let _write_result = stream.write_all(&read_buf[14..length]);
+                    println!("ECHO")
+                } else {
+                    let _write_result = stream.write_all(b"+PONG\r\n");
+                }
+            }
+            Err(_) => {}
+        };
+        stream.flush().unwrap();
     }
 }
