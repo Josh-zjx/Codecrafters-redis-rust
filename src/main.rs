@@ -28,7 +28,6 @@ fn main() {
 
 fn handle_client(mut stream: TcpStream) {
     let mut read_buf: [u8; 256] = [0; 256];
-    let echo_tag = b"ECHO";
     loop {
         read_buf = [0; 256];
         let read_result = stream.read(&mut read_buf);
@@ -37,7 +36,7 @@ fn handle_client(mut stream: TcpStream) {
                 if length == 0 {
                     continue;
                 }
-                if &read_buf[8..12] == echo_tag {
+                if &read_buf[8..12] == b"ECHO" || &read_buf[8..12] == b"echo" {
                     let _write_result = stream.write_all(&read_buf[14..length]);
                     println!("ECHO")
                 } else {
