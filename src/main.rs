@@ -35,6 +35,7 @@ fn _send_hand_shake(config: &ServerConfig) {
     // Handshake 1
     let ping = Message::arrays(&[Message::bulk_string("ping")]);
     stream.write_all(ping.to_string().as_bytes()).unwrap();
+    let _read_result = stream.read(&mut read_buf);
     // Handshake 2.1
     let replconf = Message::arrays(&[
         Message::bulk_string("REPLCONF"),
@@ -42,11 +43,22 @@ fn _send_hand_shake(config: &ServerConfig) {
         Message::bulk_string(config._port.as_str()),
     ]);
     stream.write_all(replconf.to_string().as_bytes()).unwrap();
+    let _read_result = stream.read(&mut read_buf);
     // Handshake 2.2
     let replconf = Message::arrays(&[
         Message::bulk_string("REPLCONF"),
         Message::bulk_string("capa"),
+        Message::bulk_string("eof"),
+        Message::bulk_string("capa"),
         Message::bulk_string("psync2"),
+    ]);
+    stream.write_all(replconf.to_string().as_bytes()).unwrap();
+    let _read_result = stream.read(&mut read_buf);
+    // Handshake 3
+    let replconf = Message::arrays(&[
+        Message::bulk_string("PSYNC"),
+        Message::bulk_string("?"),
+        Message::bulk_string("-1"),
     ]);
     stream.write_all(replconf.to_string().as_bytes()).unwrap();
     let _read_result = stream.read(&mut read_buf);
