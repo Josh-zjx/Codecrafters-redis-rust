@@ -251,7 +251,13 @@ fn read_rdb(dbfilename: String) -> RDB {
     println!("{}", path.display());
     let mut file = match File::open(path) {
         Ok(file) => file,
-        Err(_err) => panic!("Cannot open file"),
+        Err(_err) => {
+            return RDB {
+                _comments: "".to_string(),
+                _db_selector: 0,
+                _storage: BTreeMap::new(),
+            }
+        }
     };
     let mut data = vec![];
     if file.read_to_end(&mut data).is_ok() {
