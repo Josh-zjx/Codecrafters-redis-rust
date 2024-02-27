@@ -16,10 +16,10 @@ pub use crate::message::*;
 #[derive(Debug, StructOpt)]
 #[structopt(name = "example")]
 struct Opt {
-    #[structopt(long, parse(from_os_str), default_value = "42")]
+    #[structopt(long, parse(from_os_str), default_value = "/tmp/redis-files")]
     _dir: PathBuf,
 
-    #[structopt(long, parse(from_os_str), default_value = "42")]
+    #[structopt(long, parse(from_os_str), default_value = "dump.rdb")]
     _dbfilename: PathBuf,
 }
 
