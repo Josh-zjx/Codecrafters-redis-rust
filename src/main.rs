@@ -144,7 +144,6 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<BTreeMap
                 }
                 "keys" => {
                     if request_message.submessage.get(1).unwrap().message == "*" {
-                        println!("key length {}", storage.keys().next().unwrap());
                         let keys = storage.keys();
                         let mut response = Message {
                             message_type: MessageType::Arrays,
@@ -152,7 +151,6 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<BTreeMap
                             submessage: vec![],
                         };
                         for i in keys {
-                            println!("{}", &i);
                             response.submessage.push(Message::bulk_string(&i));
                         }
                         response
@@ -171,7 +169,6 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<BTreeMap
 fn initialize() -> BTreeMap<String, String> {
     // Parse and Set configuration from launch arguments
     let opt = Opt::from_args();
-    println!("{:?}", opt);
 
     let mut config: BTreeMap<String, String> = BTreeMap::new();
     config.insert("dir".to_string(), opt._dir.to_string_lossy().to_string());
@@ -231,7 +228,6 @@ impl RDB {
         if index >= s.len() {
             return None;
         }
-        println!("Reading length {}", s[index]);
         if s[index] == 0xFF {
             return None;
         }
@@ -248,7 +244,6 @@ impl RDB {
 
 fn read_rdb(dbfilename: String) -> RDB {
     let path = Path::new(&dbfilename);
-    println!("{}", path.display());
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(_err) => {
@@ -261,9 +256,9 @@ fn read_rdb(dbfilename: String) -> RDB {
     };
     let mut data = vec![];
     if file.read_to_end(&mut data).is_ok() {
-        println!("{}", &data.len());
+        println!("Reading {} bytes from rdb file", &data.len());
     } else {
-        panic!("Cannot open file");
+        panic!("Cannot read file");
     }
     let data: &[u8] = &data;
     let mut rdb = RDB {
@@ -275,8 +270,6 @@ fn read_rdb(dbfilename: String) -> RDB {
     while let Some(index) = res {
         res = rdb.read_data(data, index);
     }
-
-    println!("data length {}", data.len());
     rdb
 }
 
@@ -290,7 +283,7 @@ fn main() {
         config.get("dir").unwrap(),
         config.get("dbfilename").unwrap()
     ));
-    println!("_database length: {}", _database._storage.len());
+    println!("database length: {}", _database._storage.len());
     let listener = TcpListener::bind("127.0.0.1:6379").expect("Listen to 6379 ports");
     let mut thread_handles = vec![];
     let database = Arc::new(_database);
