@@ -1,5 +1,4 @@
 use rand::{distributions::Alphanumeric, Rng};
-use std::arch::x86_64::_SIDD_LEAST_SIGNIFICANT;
 use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -30,7 +29,7 @@ struct Opt {
     _replicaof: Option<Vec<String>>,
 }
 
-fn _send_hand_shake(config: &ServerConfig) {
+fn _send_hand_shake(config: &ServerConfig) -> Result<TcpStream, &str> {
     let mut stream = TcpStream::connect(config._master_ip_port.clone().unwrap()).unwrap();
     let mut read_buf: [u8; 256] = [0; 256];
     // Handshake 1
@@ -63,6 +62,7 @@ fn _send_hand_shake(config: &ServerConfig) {
     ]);
     stream.write_all(replconf.to_string().as_bytes()).unwrap();
     let _read_result = stream.read(&mut read_buf);
+    Ok(stream)
 }
 fn _handle_master(mut stream: TcpStream, database: Arc<RDB>, _config: Arc<ServerConfig>) {
     let mut read_buf: [u8; 256];
@@ -140,9 +140,14 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
     let mut read_buf: [u8; 256];
     //let mut storage = BTreeMap::<String, Item>::new();
     let mut storage = database._storage.clone();
-
+    let mut fullresync = false;
     loop {
         read_buf = [0; 256];
+        if fullresync {
+            stream.write_all(&RDB::fullresync_rdb()).unwrap();
+            fullresync = false;
+            continue;
+        }
         let read_result = stream.read(&mut read_buf);
         if let Ok(length) = read_result {
             if length == 0 {
@@ -307,7 +312,7 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                                 .as_str(),
                             )
                         } else {
-                            Message::bulk_string(format!("role:slave").as_str())
+                            Message::bulk_string(format!("role:slave{}", "").as_str())
                         }
                     } else {
                         Message::null_blk_string()
@@ -323,11 +328,13 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                         .to_lowercase()
                         .as_str()
                     {
+                        "impossible" => Message::null_blk_string(),
                         _default => Message::simple_string("OK"),
                     }
                 }
                 "psync" => {
                     if request_message.submessage.get(1).unwrap().message == "?" {
+                        fullresync = true;
                         Message::simple_string(
                             format!("FULLRESYNC {} 0", &config._master_id).as_str(),
                         )
@@ -368,15 +375,10 @@ impl ServerConfig {
             _dir: opt._dir.to_string_lossy().to_string(),
             _dbfilename: opt._dbfilename.to_string_lossy().to_string(),
             _master: opt._replicaof.is_none(),
-            _master_ip_port: if let Some(master) = &opt._replicaof {
-                Some(format!(
-                    "{}:{}",
-                    master.get(0).unwrap(),
-                    master.get(1).unwrap()
-                ))
-            } else {
-                None
-            },
+            _master_ip_port: opt
+                ._replicaof
+                .as_ref()
+                .map(|master| format!("{}:{}", master.first().unwrap(), master.get(1).unwrap())),
             _master_id: rand::thread_rng()
                 .sample_iter(&Alphanumeric)
                 .take(40)
@@ -395,12 +397,15 @@ fn main() {
     // Initialize configuration from launch arguments
     let config = Arc::new(ServerConfig::new());
     if !config._master {
-        _send_hand_shake(&config);
+        if let Ok(_stream) = _send_hand_shake(&config) {
+            println!("Ehh")
+            //let _database = RDB::read_rdb_from_stream(stream);
+        }
     }
-    let _database = RDB::read_rdb(format!("{}/{}", config._dir, config._dbfilename));
+    let _database = RDB::read_rdb_from_file(format!("{}/{}", config._dir, config._dbfilename));
     println!("database length: {}", _database._storage.len());
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", config._port))
-        .expect(format!("Listening to Port {}", config._port).as_str());
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", config._port)).unwrap();
+    println!("Listening to Port {}", config._port);
     let mut thread_handles = vec![];
     let database = Arc::new(_database);
 
