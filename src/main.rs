@@ -205,9 +205,7 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                 "set" => {
                     {
                         for mut slave in config._slave_list.write().unwrap().iter() {
-                            slave
-                                .write_all(&request_message.to_string().as_bytes())
-                                .unwrap();
+                            slave.write_all(&read_buf[..length]).unwrap();
                             slave.flush().unwrap();
                         }
                     }
@@ -370,6 +368,7 @@ pub struct ServerConfig {
     _master_id: String,
     _master_repl_offset: u64,
     _slave_list: RwLock<Vec<TcpStream>>,
+    _write_op_queue: RwLock<Vec<Message>>,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -398,6 +397,7 @@ impl ServerConfig {
                 .collect(),
             _master_repl_offset: 0,
             _slave_list: RwLock::new(vec![]),
+            _write_op_queue: RwLock::new(vec![]),
         };
 
         config
@@ -409,6 +409,7 @@ fn main() {
 
     // Initialize configuration from launch arguments
     let config = Arc::new(ServerConfig::new());
+    let mut thread_handles = vec![];
     if !config._master {
         if let Ok(mut _stream) = _send_hand_shake(&config) {
             println!("Ehh");
@@ -418,6 +419,7 @@ fn main() {
                     let _ = _stream.read(&mut read_buf).unwrap();
                 }
             });
+            thread_handles.push(_handler);
             //let _database = RDB::read_rdb_from_stream(stream);
         }
     }
@@ -425,7 +427,6 @@ fn main() {
     println!("database length: {}", _database._storage.len());
     let listener = TcpListener::bind(format!("127.0.0.1:{}", config._port)).unwrap();
     println!("Listening to Port {}", config._port);
-    let mut thread_handles = vec![];
     let database = Arc::new(_database);
 
     for stream in listener.incoming() {
@@ -438,6 +439,7 @@ fn main() {
             thread_handles.push(handler);
         }
     }
+
     for handler in thread_handles {
         let _ = handler.join();
     }
