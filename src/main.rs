@@ -216,6 +216,7 @@ impl RDB {
             return None;
         }
 
+        let mut index = index;
         // Implement
         let mut item = Item {
             value: "".to_string(),
@@ -224,8 +225,10 @@ impl RDB {
         if s[index] == 0xFD {
             item.expire =
                 (u32::from_be_bytes(s[index + 1..index + 5].try_into().unwrap()) * 1000) as u64;
+            index += 5;
         } else if s[index] == 0xFC {
             item.expire = u64::from_be_bytes(s[index + 1..index + 9].try_into().unwrap());
+            index += 9;
         }
 
         let mut index = index + 1;
