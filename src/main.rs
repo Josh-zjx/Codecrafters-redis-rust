@@ -138,7 +138,6 @@ fn _handle_master(mut stream: TcpStream, database: Arc<RDB>, _config: Arc<Server
 
 fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerConfig>) {
     let mut read_buf: [u8; 256];
-    let mut write_op = false;
     //let mut storage = BTreeMap::<String, Item>::new();
     let mut storage = database._storage.clone();
     let mut fullresync = false;
@@ -204,10 +203,12 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                 }
 
                 "set" => {
-                    for mut slave in config._slave_list.write().unwrap().iter() {
-                        slave
-                            .write_all(request_message.to_string().as_bytes())
-                            .unwrap()
+                    {
+                        for mut slave in config._slave_list.write().unwrap().iter() {
+                            slave
+                                .write_all(&request_message.to_string().as_bytes())
+                                .unwrap()
+                        }
                     }
                     let mut new_data = Item {
                         value: request_message
@@ -408,8 +409,14 @@ fn main() {
     // Initialize configuration from launch arguments
     let config = Arc::new(ServerConfig::new());
     if !config._master {
-        if let Ok(_stream) = _send_hand_shake(&config) {
-            println!("Ehh")
+        if let Ok(mut _stream) = _send_hand_shake(&config) {
+            println!("Ehh");
+            let _handler = thread::spawn(move || {
+                let mut read_buf = [0; 256];
+                loop {
+                    let _ = _stream.read(&mut read_buf).unwrap();
+                }
+            });
             //let _database = RDB::read_rdb_from_stream(stream);
         }
     }
