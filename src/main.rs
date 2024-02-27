@@ -207,7 +207,8 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                         for mut slave in config._slave_list.write().unwrap().iter() {
                             slave
                                 .write_all(&request_message.to_string().as_bytes())
-                                .unwrap()
+                                .unwrap();
+                            slave.flush().unwrap();
                         }
                     }
                     let mut new_data = Item {
