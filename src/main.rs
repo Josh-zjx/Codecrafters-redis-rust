@@ -70,7 +70,7 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<BTreeMap
                                     < SystemTime::now()
                                         .duration_since(UNIX_EPOCH)
                                         .unwrap()
-                                        .as_millis() as usize
+                                        .as_millis() as u64
                             {
                                 Message::null_blk_string()
                             } else {
@@ -103,13 +103,13 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<BTreeMap
                             new_data.expire = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
                                 .unwrap()
-                                .as_millis() as usize
+                                .as_millis() as u64
                                 + request_message
                                     .submessage
                                     .get(4)
                                     .expect("No load for extra operator")
                                     .message
-                                    .parse::<usize>()
+                                    .parse::<u64>()
                                     .unwrap();
                         } else {
                             println!("Not Important");
@@ -151,7 +151,18 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<BTreeMap
                             submessage: vec![],
                         };
                         for i in keys {
-                            response.submessage.push(Message::bulk_string(i));
+                            let exp = storage.get(i).unwrap().expire;
+                            if exp != 0
+                                && exp
+                                    < SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_millis() as u64
+                            {
+                                println!("data expired");
+                            } else {
+                                response.submessage.push(Message::bulk_string(i));
+                            }
                         }
                         response
                     } else {
@@ -204,7 +215,19 @@ impl RDB {
         if s[index] == 0xFF {
             return None;
         }
-        // TODO: Implement parser for other type of data
+
+        // Implement
+        let mut item = Item {
+            value: "".to_string(),
+            expire: 0,
+        };
+        if s[index] == 0xFD {
+            item.expire =
+                (u32::from_be_bytes(s[index + 1..index + 5].try_into().unwrap()) * 1000) as u64;
+        } else if s[index] == 0xFC {
+            item.expire = u64::from_be_bytes(s[index + 1..index + 9].try_into().unwrap());
+        }
+
         let mut index = index + 1;
         let key;
         if let Some((nindex, length)) = self.parse_length_encoding(s, index) {
@@ -217,9 +240,19 @@ impl RDB {
         }
         if let Some((nindex, length)) = self.parse_length_encoding(s, index) {
             println!("Reading from {} to {}", nindex, nindex + length);
-            let value = String::from_utf8(s[nindex..nindex + length].to_vec()).unwrap();
-            println!("new value {}", value);
-            self._storage.insert(key, Item { value, expire: 0 });
+            item.value = String::from_utf8(s[nindex..nindex + length].to_vec()).unwrap();
+            println!("new value {}", item.value);
+            if item.expire != 0
+                && item.expire
+                    < SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64
+            {
+                println!("Value expired");
+            } else {
+                self._storage.insert(key, item);
+            }
             Some(nindex + length)
         } else {
             None

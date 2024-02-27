@@ -4,7 +4,7 @@ use std::string::ParseError;
 #[derive(Clone, Debug)]
 pub struct Item {
     pub value: String,
-    pub expire: usize,
+    pub expire: u64,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
