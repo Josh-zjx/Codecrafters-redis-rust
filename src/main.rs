@@ -24,6 +24,9 @@ struct Opt {
 
     #[structopt(long, default_value = "6379")]
     _port: u32,
+
+    #[structopt(long, parse(from_str))]
+    _replicaof: Option<Vec<String>>,
 }
 
 fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<BTreeMap<String, String>>) {
@@ -181,7 +184,9 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<BTreeMap
                         .to_lowercase()
                         == "replication"
                     {
-                        Message::bulk_string("role:master")
+                        Message::bulk_string(
+                            format!("role:{}", config.get("role").unwrap()).as_str(),
+                        )
                     } else {
                         Message::null_blk_string()
                     }
@@ -206,6 +211,17 @@ fn initialize() -> BTreeMap<String, String> {
         opt._dbfilename.to_string_lossy().to_string(),
     );
     config.insert("port".to_string(), opt._port.to_string());
+
+    if let Some(master) = opt._replicaof {
+        config.insert("role".to_string(), "slave".to_string());
+        config.insert(
+            "master_ip_port".to_string(),
+            format!("{}:{}", master.first().unwrap(), master.get(1).unwrap()),
+        );
+    } else {
+        config.insert("role".to_string(), "master".to_string());
+    }
+
     config
 }
 
