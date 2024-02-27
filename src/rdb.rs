@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::prelude::*;
+use std::net::TcpStream;
 use std::sync::RwLock;
 //use std::net::TcpStream;
 use std::path::Path;
@@ -114,6 +115,21 @@ impl RDB {
             println!("Reading {} bytes from rdb file", &data.len());
         }
         let data: &[u8] = &data;
+        let mut rdb = RDB {
+            _storage: RwLock::new(BTreeMap::new()),
+            _db_selector: 0,
+        };
+        let mut res = rdb.read_header(data);
+        while let Some(index) = res {
+            res = rdb.read_data(data, index);
+        }
+        rdb
+    }
+
+    pub fn read_rdb_from_stream(stream: &mut TcpStream) -> Self {
+        let mut read_buf = [0; 256];
+        let length = stream.read(&mut read_buf).unwrap();
+        let data = &read_buf[..length];
         let mut rdb = RDB {
             _storage: RwLock::new(BTreeMap::new()),
             _db_selector: 0,

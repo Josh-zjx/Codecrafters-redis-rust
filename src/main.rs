@@ -62,7 +62,6 @@ fn _send_hand_shake(config: &ServerConfig) -> Result<TcpStream, &str> {
     ]);
     stream.write_all(replconf.to_string().as_bytes()).unwrap();
     let _read_result = stream.read(&mut read_buf).unwrap();
-    let _read_result = stream.read(&mut read_buf).unwrap();
     Ok(stream)
 }
 
@@ -340,13 +339,15 @@ fn main() {
     println!("Logs from your program will appear here!");
 
     // Initialize configuration from launch arguments
+    let _database;
+    let database;
     let config = Arc::new(ServerConfig::new());
     let mut thread_handles = vec![];
-    let _database = RDB::read_rdb_from_file(format!("{}/{}", config._dir, config._dbfilename));
-    let database = Arc::new(_database);
     if !config._master {
         if let Ok(mut _stream) = _send_hand_shake(&config) {
             println!("Ehh");
+            _database = RDB::read_rdb_from_stream(&mut _stream);
+            database = Arc::new(_database);
             let config_ref = Arc::clone(&config);
             let database_ref = Arc::clone(&database);
             let _handler = thread::spawn(move || {
@@ -354,7 +355,13 @@ fn main() {
             });
             thread_handles.push(_handler);
             //let _database = RDB::read_rdb_from_stream(stream);
+        } else {
+            _database = RDB::read_rdb_from_file(format!("{}/{}", config._dir, config._dbfilename));
+            database = Arc::new(_database)
         }
+    } else {
+        _database = RDB::read_rdb_from_file(format!("{}/{}", config._dir, config._dbfilename));
+        database = Arc::new(_database)
     }
     //println!("database length: {}", _database._storage.len());
     let listener = TcpListener::bind(format!("127.0.0.1:{}", config._port)).unwrap();
