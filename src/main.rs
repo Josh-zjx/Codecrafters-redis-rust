@@ -68,7 +68,6 @@ fn _send_hand_shake(config: &ServerConfig) -> Result<TcpStream, &str> {
 fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerConfig>) {
     let mut read_buf: [u8; 256];
     //let mut storage = BTreeMap::<String, Item>::new();
-    let mut storage = database._storage.clone();
     let mut fullresync = false;
     loop {
         read_buf = [0; 256];
@@ -106,6 +105,7 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                         .as_str(),
                 ),
                 "get" => {
+                    let storage = database._storage.read().unwrap();
                     let key = &request_message
                         .submessage
                         .get(1)
@@ -171,6 +171,7 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                             println!("Not Important");
                         }
                     }
+                    let mut storage = database._storage.write().unwrap();
                     storage.insert(
                         request_message.submessage.get(1).unwrap().message.clone(),
                         new_data,
@@ -207,6 +208,7 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                 }
                 "keys" => {
                     if request_message.submessage.get(1).unwrap().message == "*" {
+                        let storage = database._storage.read().unwrap();
                         let keys = storage.keys();
                         let mut response = Message {
                             message_type: MessageType::Arrays,
@@ -339,24 +341,23 @@ fn main() {
     // Initialize configuration from launch arguments
     let config = Arc::new(ServerConfig::new());
     let mut thread_handles = vec![];
+    let _database = RDB::read_rdb_from_file(format!("{}/{}", config._dir, config._dbfilename));
+    let database = Arc::new(_database);
     if !config._master {
         if let Ok(mut _stream) = _send_hand_shake(&config) {
             println!("Ehh");
+            let config_ref = Arc::clone(&config);
+            let database_ref = Arc::clone(&database);
             let _handler = thread::spawn(move || {
-                let mut read_buf = [0; 256];
-                loop {
-                    let _ = _stream.read(&mut read_buf).unwrap();
-                }
+                handle_master(_stream, database_ref, config_ref);
             });
             thread_handles.push(_handler);
             //let _database = RDB::read_rdb_from_stream(stream);
         }
     }
-    let _database = RDB::read_rdb_from_file(format!("{}/{}", config._dir, config._dbfilename));
-    println!("database length: {}", _database._storage.len());
+    //println!("database length: {}", _database._storage.len());
     let listener = TcpListener::bind(format!("127.0.0.1:{}", config._port)).unwrap();
     println!("Listening to Port {}", config._port);
-    let database = Arc::new(_database);
 
     for stream in listener.incoming() {
         let config_ref = Arc::clone(&config);
@@ -371,5 +372,94 @@ fn main() {
 
     for handler in thread_handles {
         let _ = handler.join();
+    }
+}
+fn handle_master(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerConfig>) {
+    let mut read_buf: [u8; 256];
+    //let mut storage = BTreeMap::<String, Item>::new();
+    loop {
+        read_buf = [0; 256];
+        let read_result = stream.read(&mut read_buf);
+        if let Ok(length) = read_result {
+            if length == 0 {
+                continue;
+            }
+            let request_message =
+                Message::from_str(&String::from_utf8(read_buf[..length].to_vec()).unwrap())
+                    .expect("Should be OK");
+            let _response: Message = match request_message
+                .submessage
+                .first()
+                .expect("Invalid Operator")
+                .message
+                .to_lowercase()
+                .as_str()
+            {
+                "set" => {
+                    {
+                        for mut slave in config._slave_list.write().unwrap().iter() {
+                            slave.write_all(&read_buf[..length]).unwrap();
+                            slave.flush().unwrap();
+                        }
+                    }
+                    let mut new_data = Item {
+                        value: request_message
+                            .submessage
+                            .get(2)
+                            .expect("No set load")
+                            .message
+                            .clone(),
+                        expire: 0,
+                    };
+                    if request_message.submessage.len() >= 4 {
+                        if request_message
+                            .submessage
+                            .get(3)
+                            .unwrap()
+                            .message
+                            .to_lowercase()
+                            == "px"
+                        {
+                            new_data.expire = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis() as u64
+                                + request_message
+                                    .submessage
+                                    .get(4)
+                                    .expect("No load for extra operator")
+                                    .message
+                                    .parse::<u64>()
+                                    .unwrap();
+                        } else {
+                            println!("Not Important");
+                        }
+                    }
+                    let mut storage = database._storage.write().unwrap();
+                    storage.insert(
+                        request_message.submessage.get(1).unwrap().message.clone(),
+                        new_data,
+                    );
+                    Message::simple_string("OK")
+                }
+                // Master-Slave handler begins here
+                "replconf" => {
+                    match request_message
+                        .submessage
+                        .get(1)
+                        .unwrap()
+                        .message
+                        .to_lowercase()
+                        .as_str()
+                    {
+                        "impossible" => Message::null_blk_string(),
+                        _default => Message::simple_string("OK"),
+                    }
+                }
+                _default => Message::null_blk_string(),
+            };
+            //let _write_result = stream.write_all(response.to_string().as_bytes());
+        };
+        stream.flush().unwrap();
     }
 }

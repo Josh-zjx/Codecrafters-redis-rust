@@ -1,13 +1,14 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::prelude::*;
+use std::sync::RwLock;
 //use std::net::TcpStream;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::message::*;
 pub struct RDB {
-    pub _storage: BTreeMap<String, Item>,
+    pub _storage: RwLock<BTreeMap<String, Item>>,
     pub _db_selector: usize,
 }
 
@@ -77,7 +78,7 @@ impl RDB {
             {
                 println!("Value expired");
             } else {
-                self._storage.insert(key, item);
+                self._storage.write().unwrap().insert(key, item);
             }
             Some(nindex + length)
         } else {
@@ -104,7 +105,7 @@ impl RDB {
             Err(_err) => {
                 return RDB {
                     _db_selector: 0,
-                    _storage: BTreeMap::new(),
+                    _storage: RwLock::new(BTreeMap::new()),
                 }
             }
         };
@@ -114,7 +115,7 @@ impl RDB {
         }
         let data: &[u8] = &data;
         let mut rdb = RDB {
-            _storage: BTreeMap::new(),
+            _storage: RwLock::new(BTreeMap::new()),
             _db_selector: 0,
         };
         let mut res = rdb.read_header(data);
