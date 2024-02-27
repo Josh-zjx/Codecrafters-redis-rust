@@ -61,7 +61,8 @@ fn _send_hand_shake(config: &ServerConfig) -> Result<TcpStream, &str> {
         Message::bulk_string("-1"),
     ]);
     stream.write_all(replconf.to_string().as_bytes()).unwrap();
-    let _read_result = stream.read(&mut read_buf);
+    let _read_result = stream.read(&mut read_buf).unwrap();
+    let _read_result = stream.read(&mut read_buf).unwrap();
     Ok(stream)
 }
 
