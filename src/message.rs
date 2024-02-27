@@ -50,6 +50,14 @@ impl Message {
         }
     }
 
+    pub fn arrays(messages: &[Message]) -> Self {
+        Message {
+            message_type: MessageType::Arrays,
+            message: "".to_string(),
+            submessage: messages.to_vec(),
+        }
+    }
+
     // Generate Message from str
 }
 impl FromStr for Message {
@@ -162,6 +170,17 @@ mod tests {
             b"+test\r\n"
         )
     }
+    #[test]
+    fn test_arrays() {
+        assert_eq!(
+            Message::arrays(&[Message::simple_string("OK"), Message::bulk_string("ECHO")]),
+            Message {
+                message_type: MessageType::Arrays,
+                message: "".to_string(),
+                submessage: vec![Message::simple_string("OK"), Message::bulk_string("ECHO")]
+            }
+        )
+    }
 
     #[test]
     fn test_null_bulk_string_as_bytes() {
@@ -189,6 +208,15 @@ mod tests {
                 },
             ],
         };
+        assert_eq!(
+            test_message,
+            Message::from_str(test_message.to_string().as_str()).unwrap()
+        )
+    }
+    #[test]
+    fn test_from_str2() {
+        let test_message =
+            Message::arrays(&[Message::bulk_string("line1"), Message::bulk_string("line2")]);
         assert_eq!(
             test_message,
             Message::from_str(test_message.to_string().as_str()).unwrap()

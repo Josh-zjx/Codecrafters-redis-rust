@@ -29,6 +29,83 @@ struct Opt {
     _replicaof: Option<Vec<String>>,
 }
 
+fn _send_hand_shake(config: &ServerConfig) {
+    let mut stream = TcpStream::connect(config._master_ip_port.clone().unwrap()).unwrap();
+    let ping = Message::arrays(&[Message::bulk_string("ping")]);
+    stream.write_all(ping.to_string().as_bytes()).unwrap();
+}
+fn _handle_master(mut stream: TcpStream, database: Arc<RDB>, _config: Arc<ServerConfig>) {
+    let mut read_buf: [u8; 256];
+    //let mut storage = BTreeMap::<String, Item>::new();
+    let mut storage = database._storage.clone();
+
+    loop {
+        read_buf = [0; 256];
+        let read_result = stream.read(&mut read_buf);
+        if let Ok(length) = read_result {
+            if length == 0 {
+                continue;
+            }
+            let request_message =
+                Message::from_str(&String::from_utf8(read_buf[..length].to_vec()).unwrap())
+                    .expect("Should be OK");
+            let response: Message = match request_message
+                .submessage
+                .first()
+                .expect("Invalid Operator")
+                .message
+                .to_lowercase()
+                .as_str()
+            {
+                "ping" => Message::simple_string("PONG"),
+                "set" => {
+                    let mut new_data = Item {
+                        value: request_message
+                            .submessage
+                            .get(2)
+                            .expect("No set load")
+                            .message
+                            .clone(),
+                        expire: 0,
+                    };
+                    if request_message.submessage.len() >= 4 {
+                        if request_message
+                            .submessage
+                            .get(3)
+                            .unwrap()
+                            .message
+                            .to_lowercase()
+                            == "px"
+                        {
+                            new_data.expire = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis() as u64
+                                + request_message
+                                    .submessage
+                                    .get(4)
+                                    .expect("No load for extra operator")
+                                    .message
+                                    .parse::<u64>()
+                                    .unwrap();
+                        } else {
+                            println!("Not Important");
+                        }
+                    }
+                    storage.insert(
+                        request_message.submessage.get(1).unwrap().message.clone(),
+                        new_data,
+                    );
+                    Message::simple_string("OK")
+                }
+                _default => Message::null_blk_string(),
+            };
+            let _write_result = stream.write_all(response.to_string().as_bytes());
+        };
+        stream.flush().unwrap();
+    }
+}
+
 fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerConfig>) {
     let mut read_buf: [u8; 256];
     //let mut storage = BTreeMap::<String, Item>::new();
@@ -138,23 +215,15 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                     {
                         let key = &request_message.submessage.get(2).unwrap().message;
                         if key == "dir" {
-                            Message {
-                                message_type: MessageType::Arrays,
-                                message: "".to_string(),
-                                submessage: vec![
-                                    Message::bulk_string(key),
-                                    Message::bulk_string(config._dir.as_str()),
-                                ],
-                            }
+                            Message::arrays(&[
+                                Message::bulk_string(key),
+                                Message::bulk_string(config._dir.as_str()),
+                            ])
                         } else if key == "dbfilename" {
-                            Message {
-                                message_type: MessageType::Arrays,
-                                message: "".to_string(),
-                                submessage: vec![
-                                    Message::bulk_string(key),
-                                    Message::bulk_string(config._dbfilename.as_str()),
-                                ],
-                            }
+                            Message::arrays(&[
+                                Message::bulk_string(key),
+                                Message::bulk_string(config._dbfilename.as_str()),
+                            ])
                         } else {
                             Message::null_blk_string()
                         }
@@ -246,7 +315,7 @@ impl ServerConfig {
             _port: opt._port.to_string(),
             _dir: opt._dir.to_string_lossy().to_string(),
             _dbfilename: opt._dbfilename.to_string_lossy().to_string(),
-            _master: !opt._replicaof.is_some(),
+            _master: opt._replicaof.is_none(),
             _master_ip_port: if let Some(master) = &opt._replicaof {
                 Some(format!(
                     "{}:{}",
@@ -273,6 +342,9 @@ fn main() {
 
     // Initialize configuration from launch arguments
     let config = Arc::new(ServerConfig::new());
+    if !config._master {
+        _send_hand_shake(&config);
+    }
     let _database = RDB::read_rdb(format!("{}/{}", config._dir, config._dbfilename));
     println!("database length: {}", _database._storage.len());
     let listener = TcpListener::bind(format!("127.0.0.1:{}", config._port))
