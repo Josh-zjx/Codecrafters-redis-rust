@@ -151,7 +151,7 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<BTreeMap
                             submessage: vec![],
                         };
                         for i in keys {
-                            response.submessage.push(Message::bulk_string(&i));
+                            response.submessage.push(Message::bulk_string(i));
                         }
                         response
                     } else {
@@ -180,7 +180,6 @@ fn initialize() -> BTreeMap<String, String> {
 }
 
 pub struct RDB {
-    _comments: String,
     _storage: BTreeMap<String, Item>,
     _db_selector: usize,
 }
@@ -197,13 +196,15 @@ impl RDB {
         Some(probe + 5)
     }
     pub fn read_data(&mut self, s: &[u8], index: usize) -> Option<usize> {
+        // Validity Check
         if index >= s.len() {
             return None;
         }
-        // TODO: Implement parser for other type of data
+        // DataSegment Terminal Check
         if s[index] == 0xFF {
             return None;
         }
+        // TODO: Implement parser for other type of data
         let mut index = index + 1;
         let key;
         if let Some((nindex, length)) = self.parse_length_encoding(s, index) {
@@ -228,14 +229,11 @@ impl RDB {
         if index >= s.len() {
             return None;
         }
-        if s[index] == 0xFF {
-            return None;
-        }
+        // TODO: Right now only implementing length-coding case one
         if s[index] < 64 {
             return Some((index + 1, s[index] as usize));
         }
-        // TODO: Rightnow only implementing length-coding case one
-        //if s[0] < 128 {
+        //else if s[0] < 128 {
         //    return Some((&s[2..], (s[0] % 64 * 256 + s[1]) as usize));
         //}
         None
@@ -248,7 +246,6 @@ fn read_rdb(dbfilename: String) -> RDB {
         Ok(file) => file,
         Err(_err) => {
             return RDB {
-                _comments: "".to_string(),
                 _db_selector: 0,
                 _storage: BTreeMap::new(),
             }
@@ -257,12 +254,9 @@ fn read_rdb(dbfilename: String) -> RDB {
     let mut data = vec![];
     if file.read_to_end(&mut data).is_ok() {
         println!("Reading {} bytes from rdb file", &data.len());
-    } else {
-        panic!("Cannot read file");
     }
     let data: &[u8] = &data;
     let mut rdb = RDB {
-        _comments: dbfilename.to_string(),
         _storage: BTreeMap::new(),
         _db_selector: 0,
     };
