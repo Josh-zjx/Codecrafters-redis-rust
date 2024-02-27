@@ -31,6 +31,7 @@ struct Opt {
 
 fn _send_hand_shake(config: &ServerConfig) {
     let mut stream = TcpStream::connect(config._master_ip_port.clone().unwrap()).unwrap();
+    let mut read_buf: [u8; 256] = [0; 256];
     // Handshake 1
     let ping = Message::arrays(&[Message::bulk_string("ping")]);
     stream.write_all(ping.to_string().as_bytes()).unwrap();
@@ -48,6 +49,7 @@ fn _send_hand_shake(config: &ServerConfig) {
         Message::bulk_string("psync2"),
     ]);
     stream.write_all(replconf.to_string().as_bytes()).unwrap();
+    let _read_result = stream.read(&mut read_buf);
 }
 fn _handle_master(mut stream: TcpStream, database: Arc<RDB>, _config: Arc<ServerConfig>) {
     let mut read_buf: [u8; 256];
