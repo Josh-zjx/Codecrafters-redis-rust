@@ -1,4 +1,5 @@
 use rand::{distributions::Alphanumeric, Rng};
+use std::arch::x86_64::_SIDD_LEAST_SIGNIFICANT;
 use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -310,6 +311,19 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                         }
                     } else {
                         Message::null_blk_string()
+                    }
+                }
+                // Master-Slave handler begins here
+                "replconf" => {
+                    match request_message
+                        .submessage
+                        .get(1)
+                        .unwrap()
+                        .message
+                        .to_lowercase()
+                        .as_str()
+                    {
+                        _default => Message::simple_string("OK"),
                     }
                 }
                 _default => Message::null_blk_string(),
