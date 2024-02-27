@@ -1,13 +1,17 @@
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::string::ParseError;
 use std::sync::Arc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 use structopt::StructOpt;
+
+mod message;
+pub use crate::message::*;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "example")]
@@ -19,237 +23,153 @@ struct Opt {
     _dbfilename: PathBuf,
 }
 
-pub struct Item {
-    pub value: String,
-    pub expire: usize,
-}
-
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-pub enum MessageType {
-    SimpleString,
-    BulkString,
-    Arrays,
-    Error,
-}
-
-#[derive(PartialEq, Eq, Clone, Debug)]
-pub struct Message {
-    pub message_type: MessageType,
-    pub message: String,
-    pub submessage: Vec<Message>,
-}
-
-impl Message {
-    // Generate null bulk string message
-    pub fn null_blk_string() -> Self {
-        Message {
-            message_type: MessageType::Error,
-            message: "".to_string(),
-            submessage: vec![],
-        }
-    }
-
-    // Generate simple string message
-    pub fn simple_string(message: &str) -> Self {
-        Message {
-            message_type: MessageType::SimpleString,
-            message: message.to_string(),
-            submessage: vec![],
-        }
-    }
-
-    // Generate bulk string message
-    pub fn bulk_string(message: &str) -> Self {
-        Message {
-            message_type: MessageType::BulkString,
-            message: message.to_string(),
-            submessage: vec![],
-        }
-    }
-
-    // Generate Message from str
-}
-impl FromStr for Message {
-    type Err = ParseError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let params: Vec<&str> = s.split("\r\n").collect();
-        let array_length = params.first().expect("Cannot find the operator num")[1..]
-            .parse()
-            .expect("Not a valid array length declaration");
-        let mut message = Message {
-            message_type: MessageType::Arrays,
-            message: "".to_string(),
-            submessage: vec![],
-        };
-        for i in 0..array_length {
-            message.submessage.push(Message::bulk_string(
-                params
-                    .get(2 * i + 2)
-                    .expect("Not enough params for requeset"),
-            ));
-        }
-        Ok(message)
-    }
-}
-impl ToString for Message {
-    // Generate string from message
-    fn to_string(&self) -> String {
-        match &self.message_type {
-            MessageType::Error => "$-1\r\n".to_string(),
-            MessageType::BulkString => {
-                format!("${}\r\n{}\r\n", &self.message.len(), self.message)
-            }
-            MessageType::SimpleString => {
-                format!("+{}\r\n", self.message)
-            }
-            MessageType::Arrays => {
-                let items_length = self.submessage.len();
-                let mut response_string: String = format!("*{}\r\n", items_length);
-                for i in 0..items_length {
-                    response_string.push_str(&self.submessage.get(i).unwrap().to_string());
-                }
-                response_string
-            }
-        }
-    }
-}
-
-fn handle_client(mut stream: TcpStream, config: Arc<BTreeMap<String, String>>) {
+fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<BTreeMap<String, String>>) {
     let mut read_buf: [u8; 256];
-    let mut storage = BTreeMap::<String, Item>::new();
+    //let mut storage = BTreeMap::<String, Item>::new();
+    let mut storage = database._storage.clone();
 
     loop {
         read_buf = [0; 256];
         let read_result = stream.read(&mut read_buf);
-        match read_result {
-            Ok(length) => {
-                if length == 0 {
-                    continue;
-                }
-                let request_message =
-                    Message::from_str(&String::from_utf8(read_buf[..length].to_vec()).unwrap())
-                        .expect("Should be OK");
-                let response: Message = match request_message
-                    .submessage
-                    .first()
-                    .expect("Invalid Operator")
-                    .message
-                    .to_lowercase()
-                    .as_str()
-                {
-                    "ping" => Message::simple_string("PONG"),
-                    "echo" => Message::bulk_string(
-                        request_message
-                            .submessage
-                            .get(1)
-                            .expect("No Load on echo")
-                            .message
-                            .as_str(),
-                    ),
-                    "get" => {
-                        let key = &request_message
-                            .submessage
-                            .get(1)
-                            .expect("No get load")
-                            .message;
-                        match &storage.get(key) {
-                            Some(data) => {
-                                let resp = &data.value;
-                                let exp = data.expire;
-                                if exp != 0
-                                    && exp
-                                        < SystemTime::now()
-                                            .duration_since(UNIX_EPOCH)
-                                            .unwrap()
-                                            .as_millis()
-                                            as usize
-                                {
-                                    Message::null_blk_string()
-                                } else {
-                                    Message::bulk_string(resp.as_str())
-                                }
-                            }
-                            None => Message::null_blk_string(),
-                        }
-                    }
-
-                    "set" => {
-                        let mut new_data = Item {
-                            value: request_message
-                                .submessage
-                                .get(2)
-                                .expect("No set load")
-                                .message
-                                .clone(),
-                            expire: 0 as usize,
-                        };
-                        if request_message.submessage.len() >= 4 {
-                            if request_message
-                                .submessage
-                                .get(3)
-                                .unwrap()
-                                .message
-                                .to_lowercase()
-                                == "px"
+        if let Ok(length) = read_result {
+            if length == 0 {
+                continue;
+            }
+            let request_message =
+                Message::from_str(&String::from_utf8(read_buf[..length].to_vec()).unwrap())
+                    .expect("Should be OK");
+            let response: Message = match request_message
+                .submessage
+                .first()
+                .expect("Invalid Operator")
+                .message
+                .to_lowercase()
+                .as_str()
+            {
+                "ping" => Message::simple_string("PONG"),
+                "echo" => Message::bulk_string(
+                    request_message
+                        .submessage
+                        .get(1)
+                        .expect("No Load on echo")
+                        .message
+                        .as_str(),
+                ),
+                "get" => {
+                    let key = &request_message
+                        .submessage
+                        .get(1)
+                        .expect("No get load")
+                        .message;
+                    match &storage.get(key) {
+                        Some(data) => {
+                            let resp = &data.value;
+                            let exp = data.expire;
+                            if exp != 0
+                                && exp
+                                    < SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_millis() as usize
                             {
-                                new_data.expire = SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_millis()
-                                    as usize
-                                    + request_message
-                                        .submessage
-                                        .get(4)
-                                        .expect("No load for extra operator")
-                                        .message
-                                        .parse::<usize>()
-                                        .unwrap();
+                                Message::null_blk_string()
                             } else {
-                                println!("Not Important");
+                                Message::bulk_string(resp.as_str())
                             }
                         }
-                        storage.insert(
-                            request_message.submessage.get(1).unwrap().message.clone(),
-                            new_data,
-                        );
-                        Message::simple_string("OK")
+                        None => Message::null_blk_string(),
                     }
-                    "config" => {
+                }
+
+                "set" => {
+                    let mut new_data = Item {
+                        value: request_message
+                            .submessage
+                            .get(2)
+                            .expect("No set load")
+                            .message
+                            .clone(),
+                        expire: 0,
+                    };
+                    if request_message.submessage.len() >= 4 {
                         if request_message
                             .submessage
-                            .get(1)
+                            .get(3)
                             .unwrap()
                             .message
                             .to_lowercase()
-                            == "get"
+                            == "px"
                         {
-                            let key = &request_message.submessage.get(2).unwrap().message;
-                            let resp = config.get(key).unwrap();
-                            Message {
-                                message_type: MessageType::Arrays,
-                                message: "".to_string(),
-                                submessage: vec![
-                                    Message::bulk_string(key),
-                                    Message::bulk_string(&resp),
-                                ],
-                            }
+                            new_data.expire = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis() as usize
+                                + request_message
+                                    .submessage
+                                    .get(4)
+                                    .expect("No load for extra operator")
+                                    .message
+                                    .parse::<usize>()
+                                    .unwrap();
                         } else {
                             println!("Not Important");
-                            Message::null_blk_string()
                         }
                     }
-                    _default => Message::null_blk_string(),
-                };
-                let _write_result = stream.write_all(response.to_string().as_bytes());
-            }
-            Err(_) => {}
+                    storage.insert(
+                        request_message.submessage.get(1).unwrap().message.clone(),
+                        new_data,
+                    );
+                    Message::simple_string("OK")
+                }
+                "config" => {
+                    if request_message
+                        .submessage
+                        .get(1)
+                        .unwrap()
+                        .message
+                        .to_lowercase()
+                        == "get"
+                    {
+                        let key = &request_message.submessage.get(2).unwrap().message;
+                        let resp = config.get(key).unwrap();
+                        Message {
+                            message_type: MessageType::Arrays,
+                            message: "".to_string(),
+                            submessage: vec![Message::bulk_string(key), Message::bulk_string(resp)],
+                        }
+                    } else {
+                        println!("Not Important");
+                        Message::null_blk_string()
+                    }
+                }
+                "keys" => {
+                    if request_message.submessage.get(1).unwrap().message == "*" {
+                        println!("key length {}", storage.keys().next().unwrap());
+                        let keys = storage.keys();
+                        let mut response = Message {
+                            message_type: MessageType::Arrays,
+                            message: "".to_string(),
+                            submessage: vec![],
+                        };
+                        for i in keys {
+                            println!("{}", &i);
+                            response.submessage.push(Message::bulk_string(&i));
+                        }
+                        response
+                    } else {
+                        Message::null_blk_string()
+                    }
+                }
+                _default => Message::null_blk_string(),
+            };
+            let _write_result = stream.write_all(response.to_string().as_bytes());
         };
         stream.flush().unwrap();
     }
 }
 
-fn main() {
-    println!("Logs from your program will appear here!");
+fn initialize() -> BTreeMap<String, String> {
+    // Parse and Set configuration from launch arguments
     let opt = Opt::from_args();
     println!("{:?}", opt);
 
@@ -259,124 +179,127 @@ fn main() {
         "dbfilename".to_string(),
         opt._dbfilename.to_string_lossy().to_string(),
     );
+    config
+}
 
-    let config = Arc::new(config);
+pub struct RDB {
+    _comments: String,
+    _storage: BTreeMap<String, Item>,
+    _db_selector: usize,
+}
+
+impl RDB {
+    pub fn read_header(&mut self, s: &[u8]) -> Option<usize> {
+        let mut probe = 0;
+        while s[probe] != 0xFE && probe < s.len() {
+            probe += 1
+        }
+        println!("skipping {} bytes", probe);
+        // TODO: Implementing Boundary/Validity check
+        self._db_selector = s[probe + 1] as usize;
+        Some(probe + 5)
+    }
+    pub fn read_data(&mut self, s: &[u8], index: usize) -> Option<usize> {
+        if index >= s.len() {
+            return None;
+        }
+        // TODO: Implement parser for other type of data
+        if s[index] == 0xFF {
+            return None;
+        }
+        let mut index = index + 1;
+        let key;
+        if let Some((nindex, length)) = self.parse_length_encoding(s, index) {
+            println!("Reading from {} to {}", nindex, nindex + length);
+            key = String::from_utf8(s[nindex..nindex + length].to_vec()).unwrap();
+            println!("new key {}", key);
+            index = nindex + length;
+        } else {
+            return None;
+        }
+        if let Some((nindex, length)) = self.parse_length_encoding(s, index) {
+            println!("Reading from {} to {}", nindex, nindex + length);
+            let value = String::from_utf8(s[nindex..nindex + length].to_vec()).unwrap();
+            println!("new value {}", value);
+            self._storage.insert(key, Item { value, expire: 0 });
+            Some(nindex + length)
+        } else {
+            None
+        }
+    }
+    pub fn parse_length_encoding(&mut self, s: &[u8], index: usize) -> Option<(usize, usize)> {
+        if index >= s.len() {
+            return None;
+        }
+        println!("Reading length {}", s[index]);
+        if s[index] == 0xFF {
+            return None;
+        }
+        if s[index] < 64 {
+            return Some((index + 1, s[index] as usize));
+        }
+        // TODO: Rightnow only implementing length-coding case one
+        //if s[0] < 128 {
+        //    return Some((&s[2..], (s[0] % 64 * 256 + s[1]) as usize));
+        //}
+        None
+    }
+}
+
+fn read_rdb(dbfilename: String) -> RDB {
+    let path = Path::new(&dbfilename);
+    println!("{}", path.display());
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(_err) => panic!("Cannot open file"),
+    };
+    let mut data = vec![];
+    if file.read_to_end(&mut data).is_ok() {
+        println!("{}", &data.len());
+    } else {
+        panic!("Cannot open file");
+    }
+    let data: &[u8] = &data;
+    let mut rdb = RDB {
+        _comments: dbfilename.to_string(),
+        _storage: BTreeMap::new(),
+        _db_selector: 0,
+    };
+    let mut res = rdb.read_header(data);
+    while let Some(index) = res {
+        res = rdb.read_data(data, index);
+    }
+
+    println!("data length {}", data.len());
+    rdb
+}
+
+fn main() {
+    println!("Logs from your program will appear here!");
+
+    // Initialize configuration from launch arguments
+    let config = Arc::new(initialize());
+    let _database = read_rdb(format!(
+        "{}/{}",
+        config.get("dir").unwrap(),
+        config.get("dbfilename").unwrap()
+    ));
+    println!("_database length: {}", _database._storage.len());
     let listener = TcpListener::bind("127.0.0.1:6379").expect("Listen to 6379 ports");
     let mut thread_handles = vec![];
+    let database = Arc::new(_database);
 
     for stream in listener.incoming() {
         let config_ref = Arc::clone(&config);
-        match stream {
-            Ok(stream) => {
-                let handler = thread::spawn(move || {
-                    handle_client(stream, config_ref);
-                });
-                thread_handles.push(handler);
-            }
-            Err(_e) => {
-                println!("Error");
-            }
+        let database_ref = Arc::clone(&database);
+        if let Ok(stream) = stream {
+            let handler = thread::spawn(move || {
+                handle_client(stream, database_ref, config_ref);
+            });
+            thread_handles.push(handler);
         }
     }
     for handler in thread_handles {
         let _ = handler.join();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::*;
-    #[test]
-    fn test_null_bulk_string() {
-        assert_eq!(
-            Message {
-                message_type: MessageType::Error,
-                message: "".to_string(),
-                submessage: vec![]
-            },
-            Message::null_blk_string()
-        );
-    }
-
-    #[test]
-    fn test_bulk_string() {
-        assert_eq!(
-            Message {
-                message_type: MessageType::BulkString,
-                message: "test_string".to_string(),
-                submessage: vec![]
-            },
-            Message::bulk_string("test_string")
-        )
-    }
-    #[test]
-    fn test_simple_string() {
-        assert_eq!(
-            Message {
-                message_type: MessageType::SimpleString,
-                message: "test_string".to_string(),
-                submessage: vec![]
-            },
-            Message::simple_string("test_string")
-        )
-    }
-    #[test]
-    fn test_bulk_string2() {
-        assert_ne!(
-            Message {
-                message_type: MessageType::BulkString,
-                message: "Test_string".to_string(),
-                submessage: vec![]
-            },
-            Message::bulk_string("test_string")
-        )
-    }
-
-    #[test]
-    fn test_bulk_string_as_bytes() {
-        assert_eq!(
-            Message::bulk_string("test").to_string().as_bytes(),
-            b"$4\r\ntest\r\n"
-        )
-    }
-
-    #[test]
-    fn test_simple_string_as_bytes() {
-        assert_eq!(
-            Message::simple_string("test").to_string().as_bytes(),
-            b"+test\r\n"
-        )
-    }
-
-    #[test]
-    fn test_null_bulk_string_as_bytes() {
-        assert_eq!(
-            Message::null_blk_string().to_string().as_bytes(),
-            b"$-1\r\n"
-        )
-    }
-
-    #[test]
-    fn test_from_str() {
-        let test_message = Message {
-            message_type: MessageType::Arrays,
-            message: "".to_string(),
-            submessage: vec![
-                Message {
-                    message_type: MessageType::BulkString,
-                    message: "line1".to_string(),
-                    submessage: vec![],
-                },
-                Message {
-                    message_type: MessageType::BulkString,
-                    message: "line2".to_string(),
-                    submessage: vec![],
-                },
-            ],
-        };
-        assert_eq!(
-            test_message,
-            Message::from_str(test_message.to_string().as_str()).unwrap()
-        )
     }
 }
