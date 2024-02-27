@@ -1,8 +1,6 @@
-use std::collections::BTreeMap;
-use std::fs::File;
+use rand::{distributions::Alphanumeric, Rng};
 use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -11,7 +9,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use structopt::StructOpt;
 
 mod message;
+mod rdb;
 pub use crate::message::*;
+pub use crate::rdb::*;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "example")]
@@ -29,7 +29,7 @@ struct Opt {
     _replicaof: Option<Vec<String>>,
 }
 
-fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<BTreeMap<String, String>>) {
+fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerConfig>) {
     let mut read_buf: [u8; 256];
     //let mut storage = BTreeMap::<String, Item>::new();
     let mut storage = database._storage.clone();
@@ -137,11 +137,26 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<BTreeMap
                         == "get"
                     {
                         let key = &request_message.submessage.get(2).unwrap().message;
-                        let resp = config.get(key).unwrap();
-                        Message {
-                            message_type: MessageType::Arrays,
-                            message: "".to_string(),
-                            submessage: vec![Message::bulk_string(key), Message::bulk_string(resp)],
+                        if key == "dir" {
+                            Message {
+                                message_type: MessageType::Arrays,
+                                message: "".to_string(),
+                                submessage: vec![
+                                    Message::bulk_string(key),
+                                    Message::bulk_string(config._dir.as_str()),
+                                ],
+                            }
+                        } else if key == "dbfilename" {
+                            Message {
+                                message_type: MessageType::Arrays,
+                                message: "".to_string(),
+                                submessage: vec![
+                                    Message::bulk_string(key),
+                                    Message::bulk_string(config._dbfilename.as_str()),
+                                ],
+                            }
+                        } else {
+                            Message::null_blk_string()
                         }
                     } else {
                         println!("Not Important");
@@ -184,9 +199,17 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<BTreeMap
                         .to_lowercase()
                         == "replication"
                     {
-                        Message::bulk_string(
-                            format!("role:{}", config.get("role").unwrap()).as_str(),
-                        )
+                        if config._master {
+                            Message::bulk_string(
+                                format!(
+                                    "role:master\nmaster_replid:{}\nmaster_repl_offset:{}",
+                                    config._master_id, config._master_repl_offset
+                                )
+                                .as_str(),
+                            )
+                        } else {
+                            Message::bulk_string(format!("role:slave").as_str())
+                        }
                     } else {
                         Message::null_blk_string()
                     }
@@ -199,165 +222,61 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<BTreeMap
     }
 }
 
-fn initialize() -> BTreeMap<String, String> {
-    // Parse and Set configuration from launch arguments
-    let opt = Opt::from_args();
-    println!("{:?}", opt);
-
-    let mut config: BTreeMap<String, String> = BTreeMap::new();
-    config.insert("dir".to_string(), opt._dir.to_string_lossy().to_string());
-    config.insert(
-        "dbfilename".to_string(),
-        opt._dbfilename.to_string_lossy().to_string(),
-    );
-    config.insert("port".to_string(), opt._port.to_string());
-
-    if let Some(master) = opt._replicaof {
-        config.insert("role".to_string(), "slave".to_string());
-        config.insert(
-            "master_ip_port".to_string(),
-            format!("{}:{}", master.first().unwrap(), master.get(1).unwrap()),
-        );
-    } else {
-        config.insert("role".to_string(), "master".to_string());
-    }
-
-    config
+pub struct ServerConfig {
+    _port: String,
+    _dir: String,
+    _dbfilename: String,
+    _master: bool,
+    _master_ip_port: Option<String>,
+    _master_id: String,
+    _master_repl_offset: u64,
 }
-
-pub struct RDB {
-    _storage: BTreeMap<String, Item>,
-    _db_selector: usize,
-}
-
-impl RDB {
-    pub fn read_header(&mut self, s: &[u8]) -> Option<usize> {
-        let mut probe = 0;
-        while s[probe] != 0xFE && probe < s.len() {
-            probe += 1
-        }
-        println!("skipping {} bytes", probe);
-        // TODO: Implementing Boundary/Validity check
-        self._db_selector = s[probe + 1] as usize;
-        Some(probe + 5)
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self::new()
     }
-    pub fn read_data(&mut self, s: &[u8], index: usize) -> Option<usize> {
-        // Validity Check
-        if index >= s.len() {
-            return None;
-        }
-        // DataSegment Terminal Check
-        if s[index] == 0xFF {
-            return None;
-        }
+}
+impl ServerConfig {
+    pub fn new() -> ServerConfig {
+        // Parse and Set configuration from launch arguments
+        let opt = Opt::from_args();
+        println!("{:?}", opt);
 
-        let mut index = index;
-        let mut item = Item {
-            value: "".to_string(),
-            expire: 0,
-        };
-        // Check Expire Timestamp
-        if s[index] == 0xFD {
-            // 0xFD leads to 4 byte uint timestamp in seconds
-            item.expire =
-                (u32::from_le_bytes(s[index + 1..index + 5].try_into().unwrap()) * 1000) as u64;
-            index += 5;
-        } else if s[index] == 0xFC {
-            // 0xFC leads to 8 bytes uint timestamp in miliseconds
-            item.expire = u64::from_le_bytes(s[index + 1..index + 9].try_into().unwrap());
-            index += 9;
-        }
-
-        // TODO: Implement check on other type of data
-        let mut index = index + 1;
-
-        // Still need to read the stream even when the data is marked expired
-        let key;
-        if let Some((nindex, length)) = self.parse_length_encoding(s, index) {
-            println!("Reading from {} to {}", nindex, nindex + length);
-            key = String::from_utf8(s[nindex..nindex + length].to_vec()).unwrap();
-            println!("new key {}", key);
-            index = nindex + length;
-        } else {
-            return None;
-        }
-        if let Some((nindex, length)) = self.parse_length_encoding(s, index) {
-            println!("Reading from {} to {}", nindex, nindex + length);
-            item.value = String::from_utf8(s[nindex..nindex + length].to_vec()).unwrap();
-            println!("new value {}", item.value);
-
-            // Discard expired data here
-            if item.expire != 0
-                && item.expire
-                    < SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64
-            {
-                println!("Value expired");
+        let config = ServerConfig {
+            _port: opt._port.to_string(),
+            _dir: opt._dir.to_string_lossy().to_string(),
+            _dbfilename: opt._dbfilename.to_string_lossy().to_string(),
+            _master: !opt._replicaof.is_some(),
+            _master_ip_port: if let Some(master) = &opt._replicaof {
+                Some(format!(
+                    "{}:{}",
+                    master.get(0).unwrap(),
+                    master.get(1).unwrap()
+                ))
             } else {
-                self._storage.insert(key, item);
-            }
-            Some(nindex + length)
-        } else {
-            None
-        }
-    }
-    pub fn parse_length_encoding(&mut self, s: &[u8], index: usize) -> Option<(usize, usize)> {
-        if index >= s.len() {
-            return None;
-        }
-        // TODO: Right now only implementing length-encoding case one
-        if s[index] < 64 {
-            return Some((index + 1, s[index] as usize));
-        }
-        //else if s[0] < 128 {
-        //    return Some((&s[2..], (s[0] % 64 * 256 + s[1]) as usize));
-        //}
-        None
-    }
-}
+                None
+            },
+            _master_id: rand::thread_rng()
+                .sample_iter(&Alphanumeric)
+                .take(40)
+                .map(char::from)
+                .collect(),
+            _master_repl_offset: 0,
+        };
 
-fn read_rdb(dbfilename: String) -> RDB {
-    let path = Path::new(&dbfilename);
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(_err) => {
-            return RDB {
-                _db_selector: 0,
-                _storage: BTreeMap::new(),
-            }
-        }
-    };
-    let mut data = vec![];
-    if file.read_to_end(&mut data).is_ok() {
-        println!("Reading {} bytes from rdb file", &data.len());
+        config
     }
-    let data: &[u8] = &data;
-    let mut rdb = RDB {
-        _storage: BTreeMap::new(),
-        _db_selector: 0,
-    };
-    let mut res = rdb.read_header(data);
-    while let Some(index) = res {
-        res = rdb.read_data(data, index);
-    }
-    rdb
 }
 
 fn main() {
     println!("Logs from your program will appear here!");
 
     // Initialize configuration from launch arguments
-    let config = Arc::new(initialize());
-    let _database = read_rdb(format!(
-        "{}/{}",
-        config.get("dir").unwrap(),
-        config.get("dbfilename").unwrap()
-    ));
+    let config = Arc::new(ServerConfig::new());
+    let _database = RDB::read_rdb(format!("{}/{}", config._dir, config._dbfilename));
     println!("database length: {}", _database._storage.len());
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", config.get("port").unwrap()))
-        .expect("Listen to 6379 ports");
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", config._port))
+        .expect(format!("Listening to Port {}", config._port).as_str());
     let mut thread_handles = vec![];
     let database = Arc::new(_database);
 
