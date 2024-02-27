@@ -21,6 +21,9 @@ struct Opt {
 
     #[structopt(long, parse(from_os_str), default_value = "dump.rdb")]
     _dbfilename: PathBuf,
+
+    #[structopt(long, default_value = "6379")]
+    _port: u32,
 }
 
 fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<BTreeMap<String, String>>) {
@@ -180,6 +183,7 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<BTreeMap
 fn initialize() -> BTreeMap<String, String> {
     // Parse and Set configuration from launch arguments
     let opt = Opt::from_args();
+    println!("{:?}", opt);
 
     let mut config: BTreeMap<String, String> = BTreeMap::new();
     config.insert("dir".to_string(), opt._dir.to_string_lossy().to_string());
@@ -187,6 +191,7 @@ fn initialize() -> BTreeMap<String, String> {
         "dbfilename".to_string(),
         opt._dbfilename.to_string_lossy().to_string(),
     );
+    config.insert("port".to_string(), opt._port.to_string());
     config
 }
 
@@ -314,7 +319,8 @@ fn main() {
         config.get("dbfilename").unwrap()
     ));
     println!("database length: {}", _database._storage.len());
-    let listener = TcpListener::bind("127.0.0.1:6379").expect("Listen to 6379 ports");
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", config.get("port").unwrap()))
+        .expect("Listen to 6379 ports");
     let mut thread_handles = vec![];
     let database = Arc::new(_database);
 
