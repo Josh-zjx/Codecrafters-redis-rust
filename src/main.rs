@@ -172,6 +172,20 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<BTreeMap
                         Message::null_blk_string()
                     }
                 }
+                "info" => {
+                    if request_message
+                        .submessage
+                        .get(1)
+                        .unwrap()
+                        .message
+                        .to_lowercase()
+                        == "replication"
+                    {
+                        Message::bulk_string("role:master")
+                    } else {
+                        Message::null_blk_string()
+                    }
+                }
                 _default => Message::null_blk_string(),
             };
             let _write_result = stream.write_all(response.to_string().as_bytes());
@@ -222,21 +236,26 @@ impl RDB {
         }
 
         let mut index = index;
-        // Implement
         let mut item = Item {
             value: "".to_string(),
             expire: 0,
         };
+        // Check Expire Timestamp
         if s[index] == 0xFD {
+            // 0xFD leads to 4 byte uint timestamp in seconds
             item.expire =
                 (u32::from_le_bytes(s[index + 1..index + 5].try_into().unwrap()) * 1000) as u64;
             index += 5;
         } else if s[index] == 0xFC {
+            // 0xFC leads to 8 bytes uint timestamp in miliseconds
             item.expire = u64::from_le_bytes(s[index + 1..index + 9].try_into().unwrap());
             index += 9;
         }
 
+        // TODO: Implement check on other type of data
         let mut index = index + 1;
+
+        // Still need to read the stream even when the data is marked expired
         let key;
         if let Some((nindex, length)) = self.parse_length_encoding(s, index) {
             println!("Reading from {} to {}", nindex, nindex + length);
@@ -250,6 +269,8 @@ impl RDB {
             println!("Reading from {} to {}", nindex, nindex + length);
             item.value = String::from_utf8(s[nindex..nindex + length].to_vec()).unwrap();
             println!("new value {}", item.value);
+
+            // Discard expired data here
             if item.expire != 0
                 && item.expire
                     < SystemTime::now()
@@ -270,7 +291,7 @@ impl RDB {
         if index >= s.len() {
             return None;
         }
-        // TODO: Right now only implementing length-coding case one
+        // TODO: Right now only implementing length-encoding case one
         if s[index] < 64 {
             return Some((index + 1, s[index] as usize));
         }
