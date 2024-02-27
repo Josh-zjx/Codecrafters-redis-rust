@@ -3,7 +3,7 @@ use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 use structopt::StructOpt;
@@ -138,6 +138,7 @@ fn _handle_master(mut stream: TcpStream, database: Arc<RDB>, _config: Arc<Server
 
 fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerConfig>) {
     let mut read_buf: [u8; 256];
+    let mut write_op = false;
     //let mut storage = BTreeMap::<String, Item>::new();
     let mut storage = database._storage.clone();
     let mut fullresync = false;
@@ -145,8 +146,11 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
         read_buf = [0; 256];
         if fullresync {
             stream.write_all(&RDB::fullresync_rdb()).unwrap();
-            fullresync = false;
-            continue;
+            config._slave_list.write().unwrap().push(stream);
+            return;
+
+            // fullresync = false;
+            // continue;
         }
         let read_result = stream.read(&mut read_buf);
         if let Ok(length) = read_result {
@@ -200,6 +204,11 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                 }
 
                 "set" => {
+                    for mut slave in config._slave_list.write().unwrap().iter() {
+                        slave
+                            .write_all(request_message.to_string().as_bytes())
+                            .unwrap()
+                    }
                     let mut new_data = Item {
                         value: request_message
                             .submessage
@@ -358,6 +367,7 @@ pub struct ServerConfig {
     _master_ip_port: Option<String>,
     _master_id: String,
     _master_repl_offset: u64,
+    _slave_list: RwLock<Vec<TcpStream>>,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -385,6 +395,7 @@ impl ServerConfig {
                 .map(char::from)
                 .collect(),
             _master_repl_offset: 0,
+            _slave_list: RwLock::new(vec![]),
         };
 
         config
