@@ -118,7 +118,9 @@ impl RDB {
         if file.read_to_end(&mut data).is_ok() {
             println!("Reading {} bytes from rdb file", &data.len());
         }
-        let data: &[u8] = &data;
+        self.read_rdb(&data);
+    }
+    pub fn read_rdb(&self, data: &[u8]) {
         let mut res = self.read_header(data);
         while let Some(index) = res {
             res = self.read_data(data, index);
@@ -141,13 +143,8 @@ impl RDB {
         }
         println!("got {} bytes of RDB file", length);
         stream.flush().unwrap();
-        /*
-                let data = &read_buf[..length];
-                let mut res = self.read_header(data);
-                while let Some(index) = res {
-                    res = self.read_data(data, index);
-                }
-        */
+        let data = &read_buf[..length];
+        self.read_rdb(data);
     }
     pub fn read_rdb_from_stream(stream: &mut TcpStream) -> Self {
         let rdb = RDB {
