@@ -297,7 +297,7 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                         Message::simple_string("OK")
                     }
                 }
-                "wait" => Message::integer(0),
+                "wait" => Message::integer(config._slave_list.read().unwrap().len() as u64),
                 _default => Message::null_blk_string(),
             };
             let _write_result = stream.write_all(response.to_string().as_bytes());
