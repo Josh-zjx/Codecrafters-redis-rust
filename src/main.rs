@@ -1,3 +1,4 @@
+use core::time;
 use rand::{distributions::Alphanumeric, Rng};
 use std::collections::VecDeque;
 use std::io::prelude::*;
@@ -307,6 +308,7 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                     if *config._master_repl_offset.read().unwrap() == 0 {
                         ans
                     } else {
+                        let flag = true;
                         let needed_num: usize = request_message
                             .submessage
                             .get(1)
@@ -314,6 +316,7 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                             .message
                             .parse()
                             .unwrap();
+                        println!("Needed Ack :{}", needed_num);
                         let mut count = 0;
                         let due = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
@@ -326,42 +329,56 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                                 .message
                                 .parse::<u64>()
                                 .unwrap();
-
-                        for slave in config._slave_list.write().unwrap().iter_mut() {
-                            slave
-                                ._stream
-                                .write_all(
-                                    Message::arrays(&[
-                                        Message::bulk_string("replconf"),
-                                        Message::bulk_string("GETACK"),
-                                        Message::bulk_string("*"),
-                                    ])
-                                    .to_string()
-                                    .as_bytes(),
-                                )
-                                .unwrap();
-                            let mes = slave.get_resp().unwrap();
-                            if mes
-                                .submessage
-                                .get(2)
-                                .unwrap()
-                                .message
-                                .parse::<u64>()
-                                .unwrap()
-                                >= *config._master_repl_offset.read().unwrap()
-                            {
-                                count += 1;
+                        {
+                            for slave in config._slave_list.write().unwrap().iter_mut() {
+                                slave
+                                    ._stream
+                                    .write_all(
+                                        Message::arrays(&[
+                                            Message::bulk_string("replconf"),
+                                            Message::bulk_string("GETACK"),
+                                            Message::bulk_string("*"),
+                                        ])
+                                        .to_string()
+                                        .as_bytes(),
+                                    )
+                                    .unwrap();
                             }
-                            if count >= needed_num
-                                || SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_millis() as u64
-                                    > due
+                        }
+                        println!("Waiting for Ack response");
+                        for slave in config._slave_list.write().unwrap().iter_mut() {
+                            if (SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis() as u64)
+                                > due
                             {
                                 ans = Message::integer(count as u64);
                                 break;
                             }
+                            println!("Trying Fetching stream");
+                            let _ = slave.get_resp().unwrap();
+                            count += 1;
+                            println!("Collected: {}", count);
+                            if (SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis() as u64)
+                                > due
+                                || flag && count >= needed_num
+                            {
+                                ans = Message::integer(count as u64);
+                                break;
+                            }
+                        }
+                        println!("Return Answer");
+                        while (SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64)
+                            < due
+                        {
+                            thread::sleep(time::Duration::from_millis(100));
                         }
                         ans
                     }
