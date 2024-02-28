@@ -13,6 +13,7 @@ pub enum MessageType {
     BulkString,
     Arrays,
     Error,
+    Integer,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -36,6 +37,13 @@ impl Message {
     pub fn simple_string(message: &str) -> Self {
         Message {
             message_type: MessageType::SimpleString,
+            message: message.to_string(),
+            submessage: vec![],
+        }
+    }
+    pub fn integer(message: u64) -> Self {
+        Message {
+            message_type: MessageType::Integer,
             message: message.to_string(),
             submessage: vec![],
         }
@@ -92,6 +100,9 @@ impl ToString for Message {
             }
             MessageType::SimpleString => {
                 format!("+{}\r\n", self.message)
+            }
+            MessageType::Integer => {
+                format!(":{}\r\n", self.message)
             }
             MessageType::Arrays => {
                 let items_length = self.submessage.len();
