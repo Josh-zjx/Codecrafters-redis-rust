@@ -14,17 +14,22 @@ pub struct RDB {
 }
 
 impl RDB {
-    fn read_header(&mut self, s: &[u8]) -> Option<usize> {
+    fn read_header(&self, s: &[u8]) -> Option<usize> {
+        if s.is_empty() {
+            return None;
+        }
         let mut probe = 0;
-        while s[probe] != 0xFE && probe < s.len() {
+        while probe < s.len() && s[probe] != 0xFE {
             probe += 1
         }
-        println!("skipping {} bytes", probe);
+        if probe + 5 > s.len() {
+            return None;
+        }
         // TODO: Implementing Boundary/Validity check
-        self._db_selector = s[probe + 1] as usize;
+        //self._db_selector = s[probe + 1] as usize;
         Some(probe + 5)
     }
-    fn read_data(&mut self, s: &[u8], index: usize) -> Option<usize> {
+    fn read_data(&self, s: &[u8], index: usize) -> Option<usize> {
         // Validity Check
         if index >= s.len() {
             return None;
@@ -57,17 +62,13 @@ impl RDB {
         // Still need to read the stream even when the data is marked expired
         let key;
         if let Some((nindex, length)) = self.parse_length_encoding(s, index) {
-            println!("Reading from {} to {}", nindex, nindex + length);
             key = String::from_utf8(s[nindex..nindex + length].to_vec()).unwrap();
-            println!("new key {}", key);
             index = nindex + length;
         } else {
             return None;
         }
         if let Some((nindex, length)) = self.parse_length_encoding(s, index) {
-            println!("Reading from {} to {}", nindex, nindex + length);
             item.value = String::from_utf8(s[nindex..nindex + length].to_vec()).unwrap();
-            println!("new value {}", item.value);
 
             // Discard expired data here
             if item.expire != 0
@@ -86,7 +87,13 @@ impl RDB {
             None
         }
     }
-    fn parse_length_encoding(&mut self, s: &[u8], index: usize) -> Option<(usize, usize)> {
+    pub fn new() -> Self {
+        RDB {
+            _storage: RwLock::new(BTreeMap::new()),
+            _db_selector: 0,
+        }
+    }
+    fn parse_length_encoding(&self, s: &[u8], index: usize) -> Option<(usize, usize)> {
         if index >= s.len() {
             return None;
         }
@@ -99,15 +106,12 @@ impl RDB {
         //}
         None
     }
-    pub fn read_rdb_from_file(dbfilename: String) -> Self {
+    pub fn load_rdb_from_file(&self, dbfilename: String) {
         let path = Path::new(&dbfilename);
         let mut file = match File::open(path) {
             Ok(file) => file,
             Err(_err) => {
-                return RDB {
-                    _db_selector: 0,
-                    _storage: RwLock::new(BTreeMap::new()),
-                }
+                return;
             }
         };
         let mut data = vec![];
@@ -115,29 +119,39 @@ impl RDB {
             println!("Reading {} bytes from rdb file", &data.len());
         }
         let data: &[u8] = &data;
-        let mut rdb = RDB {
+        let mut res = self.read_header(data);
+        while let Some(index) = res {
+            res = self.read_data(data, index);
+        }
+    }
+    pub fn read_rdb_from_file(dbfilename: String) -> Self {
+        let rdb = RDB {
             _storage: RwLock::new(BTreeMap::new()),
             _db_selector: 0,
         };
-        let mut res = rdb.read_header(data);
-        while let Some(index) = res {
-            res = rdb.read_data(data, index);
-        }
+        rdb.load_rdb_from_file(dbfilename);
         rdb
     }
 
-    pub fn read_rdb_from_stream(stream: &mut TcpStream) -> Self {
+    pub fn load_rdb_from_stream(&self, stream: &mut TcpStream) {
         let mut read_buf = [0; 256];
-        let length = stream.read(&mut read_buf).unwrap();
+        let mut length = stream.read(&mut read_buf).unwrap();
+        while length == 0 {
+            length = stream.read(&mut read_buf).unwrap();
+        }
+        return;
         let data = &read_buf[..length];
-        let mut rdb = RDB {
+        let mut res = self.read_header(data);
+        while let Some(index) = res {
+            res = self.read_data(data, index);
+        }
+    }
+    pub fn read_rdb_from_stream(stream: &mut TcpStream) -> Self {
+        let rdb = RDB {
             _storage: RwLock::new(BTreeMap::new()),
             _db_selector: 0,
         };
-        let mut res = rdb.read_header(data);
-        while let Some(index) = res {
-            res = rdb.read_data(data, index);
-        }
+        rdb.load_rdb_from_stream(stream);
         rdb
     }
     //pub fn read_rdb_from_stream(stream: &TcpStream) -> Self {}
@@ -153,5 +167,10 @@ impl RDB {
             0xc0, 0xff, 0x5a, 0xa2,
         ];
         [format!("${}\r\n", &rdb.len()).as_bytes(), &rdb].concat()
+    }
+}
+impl Default for RDB {
+    fn default() -> Self {
+        RDB::new()
     }
 }

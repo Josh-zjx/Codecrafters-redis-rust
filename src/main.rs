@@ -1,3 +1,4 @@
+use core::time;
 use rand::{distributions::Alphanumeric, Rng};
 use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
@@ -43,7 +44,9 @@ fn _send_hand_shake(config: &ServerConfig) -> Result<TcpStream, &str> {
         Message::bulk_string(config._port.as_str()),
     ]);
     stream.write_all(replconf.to_string().as_bytes()).unwrap();
+    stream.flush().unwrap();
     let _read_result = stream.read(&mut read_buf);
+    stream.flush().unwrap();
     // Handshake 2.2
     let replconf = Message::arrays(&[
         Message::bulk_string("REPLCONF"),
@@ -53,7 +56,9 @@ fn _send_hand_shake(config: &ServerConfig) -> Result<TcpStream, &str> {
         Message::bulk_string("psync2"),
     ]);
     stream.write_all(replconf.to_string().as_bytes()).unwrap();
+    stream.flush().unwrap();
     let _read_result = stream.read(&mut read_buf);
+    stream.flush().unwrap();
     // Handshake 3
     let replconf = Message::arrays(&[
         Message::bulk_string("PSYNC"),
@@ -61,7 +66,10 @@ fn _send_hand_shake(config: &ServerConfig) -> Result<TcpStream, &str> {
         Message::bulk_string("-1"),
     ]);
     stream.write_all(replconf.to_string().as_bytes()).unwrap();
+    stream.flush().unwrap();
     let _read_result = stream.read(&mut read_buf).unwrap();
+    stream.flush().unwrap();
+
     Ok(stream)
 }
 
@@ -73,6 +81,7 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
         read_buf = [0; 256];
         if fullresync {
             stream.write_all(&RDB::fullresync_rdb()).unwrap();
+            stream.flush().unwrap();
             config._slave_list.write().unwrap().push(stream);
             return;
 
@@ -310,7 +319,6 @@ impl ServerConfig {
     pub fn new() -> ServerConfig {
         // Parse and Set configuration from launch arguments
         let opt = Opt::from_args();
-        println!("{:?}", opt);
 
         let config = ServerConfig {
             _port: opt._port.to_string(),
@@ -336,36 +344,34 @@ impl ServerConfig {
 }
 
 fn main() {
-    println!("Logs from your program will appear here!");
-
     // Initialize configuration from launch arguments
-    let _database;
-    let database;
     let config = Arc::new(ServerConfig::new());
     let mut thread_handles = vec![];
+    let _database = RDB::new();
+    let database = Arc::new(RDB::new());
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", config._port)).unwrap();
+    println!("Listening to Port {}", config._port);
     if !config._master {
         if let Ok(mut _stream) = _send_hand_shake(&config) {
-            println!("Ehh");
-            _database = RDB::read_rdb_from_stream(&mut _stream);
-            database = Arc::new(_database);
             let config_ref = Arc::clone(&config);
             let database_ref = Arc::clone(&database);
+
             let _handler = thread::spawn(move || {
+                println!("Trying to get RDB from master");
+                database_ref.load_rdb_from_stream(&mut _stream);
+                println!("Starting slave - master communication");
                 handle_master(_stream, database_ref, config_ref);
             });
             thread_handles.push(_handler);
-            //let _database = RDB::read_rdb_from_stream(stream);
+            println!("Returning to normal operations");
         } else {
-            _database = RDB::read_rdb_from_file(format!("{}/{}", config._dir, config._dbfilename));
-            database = Arc::new(_database)
+            database.load_rdb_from_file(format!("{}/{}", config._dir, config._dbfilename));
         }
     } else {
-        _database = RDB::read_rdb_from_file(format!("{}/{}", config._dir, config._dbfilename));
-        database = Arc::new(_database)
+        database.load_rdb_from_file(format!("{}/{}", config._dir, config._dbfilename));
     }
+
     //println!("database length: {}", _database._storage.len());
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", config._port)).unwrap();
-    println!("Listening to Port {}", config._port);
 
     for stream in listener.incoming() {
         let config_ref = Arc::clone(&config);
@@ -385,6 +391,29 @@ fn main() {
 fn handle_master(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerConfig>) {
     let mut read_buf: [u8; 256];
     //let mut storage = BTreeMap::<String, Item>::new();
+    if let Ok(mut storage) = database._storage.write() {
+        storage.insert(
+            "foo".to_string(),
+            Item {
+                value: "123".to_string(),
+                expire: 0,
+            },
+        );
+        storage.insert(
+            "bar".to_string(),
+            Item {
+                value: "456".to_string(),
+                expire: 0,
+            },
+        );
+        storage.insert(
+            "baz".to_string(),
+            Item {
+                value: "789".to_string(),
+                expire: 0,
+            },
+        );
+    }
     loop {
         read_buf = [0; 256];
         let read_result = stream.read(&mut read_buf);
