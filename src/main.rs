@@ -31,7 +31,7 @@ struct Opt {
 
 fn _send_hand_shake(config: &ServerConfig) -> Result<TcpStream, &str> {
     let mut stream = TcpStream::connect(config._master_ip_port.clone().unwrap()).unwrap();
-    let mut read_buf: [u8; 256] = [0; 256];
+    let mut read_buf = [0; 512];
     // Handshake 1
     let ping = Message::arrays(&[Message::bulk_string("ping")]);
     stream.write_all(ping.to_string().as_bytes()).unwrap();
@@ -43,9 +43,6 @@ fn _send_hand_shake(config: &ServerConfig) -> Result<TcpStream, &str> {
         Message::bulk_string(config._port.as_str()),
     ]);
     stream.write_all(replconf.to_string().as_bytes()).unwrap();
-    stream.flush().unwrap();
-    let _read_result = stream.read(&mut read_buf);
-    stream.flush().unwrap();
     // Handshake 2.2
     let replconf = Message::arrays(&[
         Message::bulk_string("REPLCONF"),
@@ -55,9 +52,6 @@ fn _send_hand_shake(config: &ServerConfig) -> Result<TcpStream, &str> {
         Message::bulk_string("psync2"),
     ]);
     stream.write_all(replconf.to_string().as_bytes()).unwrap();
-    stream.flush().unwrap();
-    let _read_result = stream.read(&mut read_buf);
-    stream.flush().unwrap();
     // Handshake 3
     let replconf = Message::arrays(&[
         Message::bulk_string("PSYNC"),
@@ -65,7 +59,6 @@ fn _send_hand_shake(config: &ServerConfig) -> Result<TcpStream, &str> {
         Message::bulk_string("-1"),
     ]);
     stream.write_all(replconf.to_string().as_bytes()).unwrap();
-    stream.flush().unwrap();
     let _read_result = stream.read(&mut read_buf).unwrap();
     stream.flush().unwrap();
 
@@ -417,13 +410,14 @@ fn handle_master(mut stream: TcpStream, database: Arc<RDB>, _config: Arc<ServerC
         read_buf = [0; 256];
         let read_result = stream.read(&mut read_buf);
         if let Ok(length) = read_result {
-            if length == 0 || length > 50 {
+            if length == 0 || length > 100 {
                 continue;
             }
+            println!("{:?}", &read_buf[..length]);
             let request_message =
                 Message::from_str(&String::from_utf8(read_buf[..length].to_vec()).unwrap())
                     .expect("Should be OK");
-            let _response: Message = match request_message
+            let _response: Option<Message> = match request_message
                 .submessage
                 .first()
                 .expect("Invalid Operator")
@@ -471,7 +465,7 @@ fn handle_master(mut stream: TcpStream, database: Arc<RDB>, _config: Arc<ServerC
                             new_data,
                         );
                     }
-                    Message::null_blk_string()
+                    None
                 }
                 // Master-Slave handler begins here
                 "replconf" => {
@@ -483,13 +477,19 @@ fn handle_master(mut stream: TcpStream, database: Arc<RDB>, _config: Arc<ServerC
                         .to_lowercase()
                         .as_str()
                     {
-                        "impossible" => Message::null_blk_string(),
-                        _default => Message::simple_string("OK"),
+                        "getack" => Some(Message::arrays(&[
+                            Message::bulk_string("REPLCONF"),
+                            Message::bulk_string("ACK"),
+                            Message::bulk_string("0"),
+                        ])),
+                        _default => None,
                     }
                 }
-                _default => Message::null_blk_string(),
+                _default => None,
             };
-            //let _write_result = stream.write_all(response.to_string().as_bytes());
+            if _response.is_some() {
+                let _write_result = stream.write_all(_response.unwrap().to_string().as_bytes());
+            }
         };
         stream.flush().unwrap();
     }
