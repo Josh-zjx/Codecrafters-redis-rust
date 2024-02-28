@@ -1,4 +1,3 @@
-use core::time;
 use rand::{distributions::Alphanumeric, Rng};
 use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
@@ -388,7 +387,7 @@ fn main() {
         let _ = handler.join();
     }
 }
-fn handle_master(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerConfig>) {
+fn handle_master(mut stream: TcpStream, database: Arc<RDB>, _config: Arc<ServerConfig>) {
     let mut read_buf: [u8; 256];
     //let mut storage = BTreeMap::<String, Item>::new();
     if let Ok(mut storage) = database._storage.write() {
@@ -418,7 +417,7 @@ fn handle_master(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
         read_buf = [0; 256];
         let read_result = stream.read(&mut read_buf);
         if let Ok(length) = read_result {
-            if length == 0 {
+            if length == 0 || length > 50 {
                 continue;
             }
             let request_message =
@@ -433,12 +432,6 @@ fn handle_master(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                 .as_str()
             {
                 "set" => {
-                    {
-                        for mut slave in config._slave_list.write().unwrap().iter() {
-                            slave.write_all(&read_buf[..length]).unwrap();
-                            slave.flush().unwrap();
-                        }
-                    }
                     let mut new_data = Item {
                         value: request_message
                             .submessage
@@ -472,12 +465,13 @@ fn handle_master(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                             println!("Not Important");
                         }
                     }
-                    let mut storage = database._storage.write().unwrap();
-                    storage.insert(
-                        request_message.submessage.get(1).unwrap().message.clone(),
-                        new_data,
-                    );
-                    Message::simple_string("OK")
+                    if let Ok(mut storage) = database._storage.write() {
+                        storage.insert(
+                            request_message.submessage.get(1).unwrap().message.clone(),
+                            new_data,
+                        );
+                    }
+                    Message::null_blk_string()
                 }
                 // Master-Slave handler begins here
                 "replconf" => {

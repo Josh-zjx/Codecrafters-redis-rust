@@ -139,12 +139,13 @@ impl RDB {
         while length == 0 {
             length = stream.read(&mut read_buf).unwrap();
         }
-        return;
+        /*
         let data = &read_buf[..length];
         let mut res = self.read_header(data);
         while let Some(index) = res {
             res = self.read_data(data, index);
         }
+        */
     }
     pub fn read_rdb_from_stream(stream: &mut TcpStream) -> Self {
         let rdb = RDB {
