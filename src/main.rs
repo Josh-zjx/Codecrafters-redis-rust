@@ -88,7 +88,11 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
         if fullresync {
             stream.write_all(&RDB::fullresync_rdb()).unwrap();
             stream.flush().unwrap();
-            config._slave_list.write().unwrap().push(stream);
+            config
+                ._slave_list
+                .write()
+                .unwrap()
+                .push(ReplicaStream::bind(stream));
             return;
 
             // fullresync = false;
@@ -148,11 +152,11 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
 
                 "set" => {
                     {
-                        for mut slave in config._slave_list.write().unwrap().iter() {
-                            slave.write_all(&read_buf[..length]).unwrap();
-                            slave.flush().unwrap();
+                        for slave in config._slave_list.write().unwrap().iter_mut() {
+                            slave._stream.write_all(&read_buf[..length]).unwrap();
                         }
                     }
+                    *config._master_repl_offset.write().unwrap() += length as u64;
                     let mut new_data = Item {
                         value: request_message
                             .submessage
@@ -262,7 +266,8 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                             Message::bulk_string(
                                 format!(
                                     "role:master\nmaster_replid:{}\nmaster_repl_offset:{}",
-                                    config._master_id, config._master_repl_offset
+                                    config._master_id,
+                                    config._master_repl_offset.read().unwrap()
                                 )
                                 .as_str(),
                             )
@@ -297,7 +302,70 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                         Message::simple_string("OK")
                     }
                 }
-                "wait" => Message::integer(config._slave_list.read().unwrap().len() as u64),
+                "wait" => {
+                    let mut ans = Message::integer(config._slave_list.read().unwrap().len() as u64);
+                    if *config._master_repl_offset.read().unwrap() == 0 {
+                        ans
+                    } else {
+                        let needed_num: usize = request_message
+                            .submessage
+                            .get(1)
+                            .unwrap()
+                            .message
+                            .parse()
+                            .unwrap();
+                        let mut count = 0;
+                        let due = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64
+                            + request_message
+                                .submessage
+                                .get(2)
+                                .expect("No load for extra operator")
+                                .message
+                                .parse::<u64>()
+                                .unwrap();
+
+                        for slave in config._slave_list.write().unwrap().iter_mut() {
+                            slave
+                                ._stream
+                                .write_all(
+                                    Message::arrays(&[
+                                        Message::bulk_string("replconf"),
+                                        Message::bulk_string("GETACK"),
+                                        Message::bulk_string("*"),
+                                    ])
+                                    .to_string()
+                                    .as_bytes(),
+                                )
+                                .unwrap();
+                            let mes = slave.get_resp().unwrap();
+                            if mes
+                                .submessage
+                                .get(2)
+                                .unwrap()
+                                .message
+                                .parse::<u64>()
+                                .unwrap()
+                                >= *config._master_repl_offset.read().unwrap()
+                            {
+                                count += 1;
+                            }
+                            if count >= needed_num
+                                || SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis() as u64
+                                    > due
+                            {
+                                ans = Message::integer(count as u64);
+                                break;
+                            }
+                        }
+                        ans
+                    }
+                }
                 _default => Message::null_blk_string(),
             };
             let _write_result = stream.write_all(response.to_string().as_bytes());
@@ -313,8 +381,8 @@ pub struct ServerConfig {
     _master: bool,
     _master_ip_port: Option<String>,
     _master_id: String,
-    _master_repl_offset: u64,
-    _slave_list: RwLock<Vec<TcpStream>>,
+    _master_repl_offset: RwLock<u64>,
+    _slave_list: RwLock<Vec<ReplicaStream>>,
     _write_op_queue: RwLock<Vec<Message>>,
     _current_ack: RwLock<u64>,
 }
@@ -342,7 +410,7 @@ impl ServerConfig {
                 .take(40)
                 .map(char::from)
                 .collect(),
-            _master_repl_offset: 0,
+            _master_repl_offset: RwLock::new(0),
             _slave_list: RwLock::new(vec![]),
             _write_op_queue: RwLock::new(vec![]),
             _current_ack: RwLock::new(0),
