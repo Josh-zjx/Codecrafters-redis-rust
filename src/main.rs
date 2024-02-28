@@ -315,6 +315,7 @@ pub struct ServerConfig {
     _master_repl_offset: u64,
     _slave_list: RwLock<Vec<TcpStream>>,
     _write_op_queue: RwLock<Vec<Message>>,
+    _current_ack: RwLock<u64>,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -343,6 +344,7 @@ impl ServerConfig {
             _master_repl_offset: 0,
             _slave_list: RwLock::new(vec![]),
             _write_op_queue: RwLock::new(vec![]),
+            _current_ack: RwLock::new(0),
         };
 
         config
@@ -428,6 +430,7 @@ fn handle_master(mut stream: ReplicaStream, database: Arc<RDB>, _config: Arc<Ser
     loop {
         let resp = stream.get_resp().unwrap();
         println!("{:?}", resp.submessage);
+        let byte_length = resp.to_string().as_bytes().len() as u64;
         match resp
             .submessage
             .first()
@@ -476,7 +479,9 @@ fn handle_master(mut stream: ReplicaStream, database: Arc<RDB>, _config: Arc<Ser
                         let mes = Message::arrays(&[
                             Message::bulk_string("REPLCONF"),
                             Message::bulk_string("ACK"),
-                            Message::bulk_string("0"),
+                            Message::bulk_string(
+                                _config._current_ack.read().unwrap().to_string().as_str(),
+                            ),
                         ]);
                         stream
                             ._stream
@@ -486,8 +491,12 @@ fn handle_master(mut stream: ReplicaStream, database: Arc<RDB>, _config: Arc<Ser
                     _default => (),
                 }
             }
+            "ping" => {}
             _default => (),
         };
+        if let Ok(mut current_ack) = _config._current_ack.write() {
+            *current_ack += byte_length;
+        }
     }
 }
 
