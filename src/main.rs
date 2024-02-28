@@ -351,6 +351,29 @@ fn main() {
     let listener = TcpListener::bind(format!("127.0.0.1:{}", config._port)).unwrap();
     println!("Listening to Port {}", config._port);
     if !config._master {
+        if let Ok(mut storage) = database._storage.write() {
+            storage.insert(
+                "foo".to_string(),
+                Item {
+                    value: "123".to_string(),
+                    expire: 0,
+                },
+            );
+            storage.insert(
+                "bar".to_string(),
+                Item {
+                    value: "456".to_string(),
+                    expire: 0,
+                },
+            );
+            storage.insert(
+                "baz".to_string(),
+                Item {
+                    value: "789".to_string(),
+                    expire: 0,
+                },
+            );
+        }
         if let Ok(mut _stream) = _send_hand_shake(&config) {
             let config_ref = Arc::clone(&config);
             let database_ref = Arc::clone(&database);
@@ -390,29 +413,6 @@ fn main() {
 fn handle_master(mut stream: TcpStream, database: Arc<RDB>, _config: Arc<ServerConfig>) {
     let mut read_buf: [u8; 256];
     //let mut storage = BTreeMap::<String, Item>::new();
-    if let Ok(mut storage) = database._storage.write() {
-        storage.insert(
-            "foo".to_string(),
-            Item {
-                value: "123".to_string(),
-                expire: 0,
-            },
-        );
-        storage.insert(
-            "bar".to_string(),
-            Item {
-                value: "456".to_string(),
-                expire: 0,
-            },
-        );
-        storage.insert(
-            "baz".to_string(),
-            Item {
-                value: "789".to_string(),
-                expire: 0,
-            },
-        );
-    }
     loop {
         read_buf = [0; 256];
         let read_result = stream.read(&mut read_buf);
