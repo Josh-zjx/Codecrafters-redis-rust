@@ -1,14 +1,18 @@
 use core::time;
 use rand::{distributions::Alphanumeric, Rng};
 use std::collections::VecDeque;
-use std::io::prelude::*;
-use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
-use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 use structopt::StructOpt;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 mod message;
 mod rdb;
@@ -31,28 +35,34 @@ struct Opt {
     _replicaof: Option<Vec<String>>,
 }
 
-fn _send_hand_shake(config: &ServerConfig) -> Result<ReplicaStream, &str> {
-    let stream = TcpStream::connect(config._master_ip_port.clone().unwrap()).unwrap();
+async fn _send_hand_shake(config: &ServerConfig) -> Result<ReplicaStream, &str> {
+    let stream = TcpStream::connect(config.master_ip_port.clone().unwrap())
+        .await
+        .unwrap();
     let mut repstream = ReplicaStream::bind(stream);
     // Handshake 1
     let ping = Message::arrays(&[Message::bulk_string("ping")]);
-    repstream
-        ._stream
+    let _ = repstream
+        .stream
+        .lock()
+        .await
         .write_all(ping.to_string().as_bytes())
-        .unwrap();
-    while repstream.get_resp().is_none() {}
+        .await;
+    while repstream.get_resp().await.is_none() {}
 
     // Handshake 2.1
     let replconf = Message::arrays(&[
         Message::bulk_string("REPLCONF"),
         Message::bulk_string("listening-port"),
-        Message::bulk_string(config._port.as_str()),
+        Message::bulk_string(config.port.as_str()),
     ]);
-    repstream
-        ._stream
+    let _ = repstream
+        .stream
+        .lock()
+        .await
         .write_all(replconf.to_string().as_bytes())
-        .unwrap();
-    while repstream.get_resp().is_none() {}
+        .await;
+    while repstream.get_resp().await.is_none() {}
     // Handshake 2.2
     let replconf = Message::arrays(&[
         Message::bulk_string("REPLCONF"),
@@ -61,49 +71,54 @@ fn _send_hand_shake(config: &ServerConfig) -> Result<ReplicaStream, &str> {
         Message::bulk_string("capa"),
         Message::bulk_string("psync2"),
     ]);
-    repstream
-        ._stream
+    let _ = repstream
+        .stream
+        .lock()
+        .await
         .write_all(replconf.to_string().as_bytes())
-        .unwrap();
-    while repstream.get_resp().is_none() {}
+        .await;
+    while repstream.get_resp().await.is_none() {}
     // Handshake 3
     let replconf = Message::arrays(&[
         Message::bulk_string("PSYNC"),
         Message::bulk_string("?"),
         Message::bulk_string("-1"),
     ]);
-    repstream
-        ._stream
+    let _ = repstream
+        .stream
+        .lock()
+        .await
         .write_all(replconf.to_string().as_bytes())
-        .unwrap();
-    while repstream.get_resp().is_none() {}
+        .await;
+    while repstream.get_resp().await.is_none() {}
     Ok(repstream)
 }
 
-fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerConfig>) {
-    let mut read_buf: [u8; 256];
+async fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerConfig>) {
+    let mut read_buf = [0; 256];
     //let mut storage = BTreeMap::<String, Item>::new();
     let mut fullresync = false;
     loop {
-        read_buf = [0; 256];
         if fullresync {
-            stream.write_all(&RDB::fullresync_rdb()).unwrap();
-            stream.flush().unwrap();
+            {
+                let _ = stream.write_all(&RDB::fullresync_rdb()).await;
+                let _ = stream.flush().await;
+            }
+            let (replica_handle, _handle) = master_slave_channel(stream);
             config
-                ._slave_list
-                .write()
-                .unwrap()
-                .push(ReplicaStream::bind(stream));
+                .master_slave_channels
+                .lock()
+                .await
+                .push(Arc::new(tokio::sync::Mutex::new(replica_handle)));
+            let _ = _handle.await;
             return;
 
             // fullresync = false;
             // continue;
         }
-        let read_result = stream.read(&mut read_buf);
+        let read_result = stream.read(&mut read_buf).await;
+        println!("Read new request");
         if let Ok(length) = read_result {
-            if length == 0 {
-                continue;
-            }
             let request_message =
                 Message::from_str(&String::from_utf8(read_buf[..length].to_vec()).unwrap())
                     .expect("Should be OK");
@@ -142,22 +157,32 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                                         .unwrap()
                                         .as_millis() as u64
                             {
-                                Message::null_blk_string()
+                                Message::null()
                             } else {
                                 Message::bulk_string(resp.as_str())
                             }
                         }
-                        None => Message::null_blk_string(),
+                        None => Message::null(),
                     }
                 }
 
                 "set" => {
+                    println!("get new set");
                     {
-                        for slave in config._slave_list.write().unwrap().iter_mut() {
-                            slave._stream.write_all(&read_buf[..length]).unwrap();
+                        for slave in config.master_slave_channels.lock().await.iter_mut() {
+                            let _ = slave
+                                .lock()
+                                .await
+                                .tx
+                                .send(ReplicaMessage {
+                                    message: request_message.clone(),
+                                    require_ack: false,
+                                })
+                                .await;
                         }
+                        println!("recasting to downstream {:?}", request_message)
                     }
-                    *config._master_repl_offset.write().unwrap() += length as u64;
+                    *config.master_repl_offset.write().unwrap() += length as u64;
                     let mut new_data = Item {
                         value: request_message
                             .submessage
@@ -196,6 +221,7 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                         request_message.submessage.get(1).unwrap().message.clone(),
                         new_data,
                     );
+                    println!("return to client");
                     Message::simple_string("OK")
                 }
                 "config" => {
@@ -211,19 +237,19 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                         if key == "dir" {
                             Message::arrays(&[
                                 Message::bulk_string(key),
-                                Message::bulk_string(config._dir.as_str()),
+                                Message::bulk_string(config.dir.as_str()),
                             ])
                         } else if key == "dbfilename" {
                             Message::arrays(&[
                                 Message::bulk_string(key),
-                                Message::bulk_string(config._dbfilename.as_str()),
+                                Message::bulk_string(config.dbfilename.as_str()),
                             ])
                         } else {
-                            Message::null_blk_string()
+                            Message::null()
                         }
                     } else {
                         println!("Not Important");
-                        Message::null_blk_string()
+                        Message::null()
                     }
                 }
                 "keys" => {
@@ -251,7 +277,7 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                         }
                         response
                     } else {
-                        Message::null_blk_string()
+                        Message::null()
                     }
                 }
                 "info" => {
@@ -263,12 +289,12 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                         .to_lowercase()
                         == "replication"
                     {
-                        if config._master {
+                        if config.is_master {
                             Message::bulk_string(
                                 format!(
                                     "role:master\nmaster_replid:{}\nmaster_repl_offset:{}",
-                                    config._master_id,
-                                    config._master_repl_offset.read().unwrap()
+                                    config.master_id,
+                                    config.master_repl_offset.read().unwrap()
                                 )
                                 .as_str(),
                             )
@@ -276,7 +302,7 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                             Message::bulk_string(format!("role:slave{}", "").as_str())
                         }
                     } else {
-                        Message::null_blk_string()
+                        Message::null()
                     }
                 }
                 // Master-Slave handler begins here
@@ -289,7 +315,7 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                         .to_lowercase()
                         .as_str()
                     {
-                        "impossible" => Message::null_blk_string(),
+                        "impossible" => Message::null(),
                         _default => Message::simple_string("OK"),
                     }
                 }
@@ -297,18 +323,16 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                     if request_message.submessage.get(1).unwrap().message == "?" {
                         fullresync = true;
                         Message::simple_string(
-                            format!("FULLRESYNC {} 0", &config._master_id).as_str(),
+                            format!("FULLRESYNC {} 0", &config.master_id).as_str(),
                         )
                     } else {
                         Message::simple_string("OK")
                     }
                 }
                 "wait" => {
-                    let mut ans = Message::integer(config._slave_list.read().unwrap().len() as u64);
-                    if *config._master_repl_offset.read().unwrap() == 0 {
-                        ans
+                    if *config.master_repl_offset.read().unwrap() == 0 {
+                        Message::integer(config.master_slave_channels.lock().await.len() as u64)
                     } else {
-                        let flag = true;
                         let needed_num: usize = request_message
                             .submessage
                             .get(1)
@@ -318,89 +342,87 @@ fn handle_client(mut stream: TcpStream, database: Arc<RDB>, config: Arc<ServerCo
                             .unwrap();
                         println!("Needed Ack :{}", needed_num);
                         let mut count = 0;
-                        let due = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
+                        let resp_timeout = request_message
+                            .submessage
+                            .get(2)
                             .unwrap()
-                            .as_millis() as u64
-                            + request_message
-                                .submessage
-                                .get(2)
-                                .expect("No load for extra operator")
-                                .message
-                                .parse::<u64>()
-                                .unwrap();
+                            .message
+                            .parse::<u64>()
+                            .unwrap();
                         {
-                            for slave in config._slave_list.write().unwrap().iter_mut() {
-                                slave
-                                    ._stream
-                                    .write_all(
-                                        Message::arrays(&[
+                            for slave in config.master_slave_channels.lock().await.iter_mut() {
+                                let _ = slave
+                                    .lock()
+                                    .await
+                                    .tx
+                                    .send(ReplicaMessage {
+                                        message: Message::arrays(&[
                                             Message::bulk_string("replconf"),
                                             Message::bulk_string("GETACK"),
                                             Message::bulk_string("*"),
-                                        ])
-                                        .to_string()
-                                        .as_bytes(),
+                                        ]),
+                                        require_ack: true,
+                                    })
+                                    .await;
+                            }
+                            let (tx, mut rx) = mpsc::channel::<bool>(15);
+                            for _slave in config.master_slave_channels.lock().await.iter_mut() {
+                                let slave = _slave.clone();
+
+                                let tx = tx.clone();
+                                let _ = tokio::spawn(async move {
+                                    if let Err(_) = timeout(
+                                        time::Duration::from_millis(resp_timeout),
+                                        slave.lock().await.rx.recv(),
                                     )
-                                    .unwrap();
+                                    .await
+                                    {
+                                        let _ = tx.send(false).await;
+                                    } else {
+                                        let _ = tx.send(true).await;
+                                    }
+                                });
                             }
-                        }
-                        println!("Waiting for Ack response");
-                        for slave in config._slave_list.write().unwrap().iter_mut() {
-                            if (SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis() as u64)
-                                > due
-                            {
-                                ans = Message::integer(count as u64);
-                                break;
+                            for _ in 0..config.master_slave_channels.lock().await.len() {
+                                if rx.recv().await.unwrap() {
+                                    count += 1
+                                }
                             }
-                            println!("Trying Fetching stream");
-                            let _ = slave.get_resp().unwrap();
-                            count += 1;
-                            println!("Collected: {}", count);
-                            if (SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis() as u64)
-                                > due
-                                || flag && count >= needed_num
-                            {
-                                ans = Message::integer(count as u64);
-                                break;
-                            }
+                            Message::integer(count)
                         }
-                        println!("Return Answer");
-                        while (SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64)
-                            < due
-                        {
-                            thread::sleep(time::Duration::from_millis(100));
-                        }
-                        ans
                     }
                 }
-                _default => Message::null_blk_string(),
+                "type" => {
+                    let key = request_message.submessage.get(1).unwrap().message.clone();
+                    if let Ok(storage) = database._storage.read() {
+                        if storage.contains_key(&key) {
+                            Message::simple_string("string")
+                        } else {
+                            Message::simple_string("none")
+                        }
+                    } else {
+                        Message::null()
+                    }
+                }
+                _default => Message::null(),
             };
-            let _write_result = stream.write_all(response.to_string().as_bytes());
+            let _write_result = stream
+                .write_all(response.to_string().as_bytes())
+                .await
+                .unwrap();
         };
-        stream.flush().unwrap();
     }
 }
 
 pub struct ServerConfig {
-    _port: String,
-    _dir: String,
-    _dbfilename: String,
-    _master: bool,
-    _master_ip_port: Option<String>,
-    _master_id: String,
-    _master_repl_offset: RwLock<u64>,
-    _slave_list: RwLock<Vec<ReplicaStream>>,
-    _write_op_queue: RwLock<Vec<Message>>,
+    port: String,
+    dir: String,
+    dbfilename: String,
+    is_master: bool,
+    master_ip_port: Option<String>,
+    master_id: String,
+    master_repl_offset: RwLock<u64>,
+    master_slave_channels: tokio::sync::Mutex<Vec<Arc<tokio::sync::Mutex<ReplicaHandle>>>>,
     _current_ack: RwLock<u64>,
 }
 impl Default for ServerConfig {
@@ -414,22 +436,21 @@ impl ServerConfig {
         let opt = Opt::from_args();
 
         let config = ServerConfig {
-            _port: opt._port.to_string(),
-            _dir: opt._dir.to_string_lossy().to_string(),
-            _dbfilename: opt._dbfilename.to_string_lossy().to_string(),
-            _master: opt._replicaof.is_none(),
-            _master_ip_port: opt
+            port: opt._port.to_string(),
+            dir: opt._dir.to_string_lossy().to_string(),
+            dbfilename: opt._dbfilename.to_string_lossy().to_string(),
+            is_master: opt._replicaof.is_none(),
+            master_ip_port: opt
                 ._replicaof
                 .as_ref()
                 .map(|master| format!("{}:{}", master.first().unwrap(), master.get(1).unwrap())),
-            _master_id: rand::thread_rng()
+            master_id: rand::thread_rng()
                 .sample_iter(&Alphanumeric)
                 .take(40)
                 .map(char::from)
                 .collect(),
-            _master_repl_offset: RwLock::new(0),
-            _slave_list: RwLock::new(vec![]),
-            _write_op_queue: RwLock::new(vec![]),
+            master_repl_offset: RwLock::new(0),
+            master_slave_channels: tokio::sync::Mutex::new(vec![]),
             _current_ack: RwLock::new(0),
         };
 
@@ -437,25 +458,28 @@ impl ServerConfig {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // Initialize configuration from launch arguments
     let config = Arc::new(ServerConfig::new());
-    let mut thread_handles = vec![];
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", config._port)).unwrap();
-    println!("Listening to Port {}", config._port);
-    if !config._master {
-        let mut stream = _send_hand_shake(&config).unwrap();
+    let mut handlers = vec![];
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", config.port))
+        .await
+        .unwrap();
+    println!("Listening to Port {}", config.port);
+    if !config.is_master {
+        let mut stream = _send_hand_shake(&config).await.unwrap();
         let config_ref = Arc::clone(&config);
         println!("Trying to get RDB from master");
-        let database = stream.get_rdb().unwrap();
+        let database = stream.get_rdb().await.unwrap();
         let database_ref = Arc::new(database);
         let _ref = database_ref.clone();
-        let _handler = thread::spawn(move || {
+        let handler = tokio::spawn(async move {
             println!("Starting slave - master communication");
-            handle_master(stream, _ref, config_ref);
+            handle_master(stream, _ref, config_ref).await;
         });
+        handlers.push(handler);
 
-        thread_handles.push(_handler);
         if let Ok(mut storage) = database_ref._storage.write() {
             storage.insert(
                 "foo".to_string(),
@@ -480,41 +504,40 @@ fn main() {
             );
         };
         println!("Returning to normal operations");
-        for stream in listener.incoming() {
+        loop {
+            let stream = listener.accept().await;
             let config_ref = Arc::clone(&config);
             let database_ref = Arc::clone(&database_ref);
-            if let Ok(stream) = stream {
-                let handler = thread::spawn(move || {
-                    handle_client(stream, database_ref, config_ref);
+            if let Ok((stream, _)) = stream {
+                let handler = tokio::spawn(async move {
+                    handle_client(stream, database_ref, config_ref).await;
                 });
-                thread_handles.push(handler);
+                handlers.push(handler);
             }
         }
     } else {
-        let database = RDB::read_rdb_from_file(format!("{}/{}", config._dir, config._dbfilename));
+        let database = RDB::read_rdb_from_file(format!("{}/{}", config.dir, config.dbfilename));
         let database_ref = Arc::new(database);
-        for stream in listener.incoming() {
+        loop {
+            let stream = listener.accept().await;
             let config_ref = Arc::clone(&config);
             let database_ref = Arc::clone(&database_ref);
-            if let Ok(stream) = stream {
-                let handler = thread::spawn(move || {
-                    handle_client(stream, database_ref, config_ref);
+            if let Ok((stream, _)) = stream {
+                println!("getting new incoming client");
+                let handler = tokio::spawn(async move {
+                    handle_client(stream, database_ref, config_ref).await;
                 });
-                thread_handles.push(handler);
+                handlers.push(handler);
             }
         }
     }
 
     //println!("database length: {}", _database._storage.len());
-
-    for handler in thread_handles {
-        let _ = handler.join();
-    }
 }
-fn handle_master(mut stream: ReplicaStream, database: Arc<RDB>, _config: Arc<ServerConfig>) {
+async fn handle_master(mut stream: ReplicaStream, database: Arc<RDB>, _config: Arc<ServerConfig>) {
     //let mut storage = BTreeMap::<String, Item>::new();
     loop {
-        let resp = stream.get_resp().unwrap();
+        let resp = stream.get_resp().await.unwrap();
         println!("{:?}", resp.submessage);
         let byte_length = resp.to_string().as_bytes().len() as u64;
         match resp
@@ -569,10 +592,12 @@ fn handle_master(mut stream: ReplicaStream, database: Arc<RDB>, _config: Arc<Ser
                                 _config._current_ack.read().unwrap().to_string().as_str(),
                             ),
                         ]);
-                        stream
-                            ._stream
+                        let _ = stream
+                            .stream
+                            .lock()
+                            .await
                             .write_all(mes.to_string().as_bytes())
-                            .unwrap();
+                            .await;
                     }
                     _default => (),
                 }
@@ -586,42 +611,93 @@ fn handle_master(mut stream: ReplicaStream, database: Arc<RDB>, _config: Arc<Ser
     }
 }
 
+pub fn master_slave_channel(mut stream: TcpStream) -> (ReplicaHandle, JoinHandle<()>) {
+    let (tx_res, mut rx) = mpsc::channel::<ReplicaMessage>(32);
+    let (tx, rx_res) = mpsc::channel::<ReplicaMessage>(32);
+    let _handler = tokio::spawn(async move {
+        loop {
+            while let Some(upstream_message) = rx.recv().await {
+                let _ = stream
+                    .write_all(upstream_message.message.to_string().as_bytes())
+                    .await;
+                let _ = stream.flush().await;
+                println!("recasting upstream message");
+                if upstream_message.require_ack {
+                    let mut read_buf = [0; 256];
+                    let length = stream.read(&mut read_buf).await.unwrap();
+                    if length == 0 {
+                        let _ = tx
+                            .send(ReplicaMessage {
+                                message: Message::null(),
+                                require_ack: false,
+                            })
+                            .await;
+                    } else {
+                        let _ = tx
+                            .send(ReplicaMessage {
+                                message: Message::null(),
+                                require_ack: true,
+                            })
+                            .await;
+                    }
+                }
+            }
+        }
+    });
+    (
+        ReplicaHandle {
+            tx: tx_res,
+            rx: rx_res,
+        },
+        _handler,
+    )
+}
+
+pub struct ReplicaMessage {
+    message: Message,
+    require_ack: bool,
+}
+
+pub struct ReplicaHandle {
+    tx: mpsc::Sender<ReplicaMessage>,
+    rx: mpsc::Receiver<ReplicaMessage>,
+}
 pub struct ReplicaStream {
     // A wrapper of TcpStream for handling RDB and resp format difference
-    pub _stream: TcpStream,
-    pub _cache: VecDeque<StreamToken>,
+    pub stream: Arc<Mutex<TcpStream>>,
+    pub cache: VecDeque<StreamToken>,
 }
 impl ReplicaStream {
     pub fn bind(stream: TcpStream) -> Self {
         Self {
-            _stream: stream,
-            _cache: vec![].into(),
+            stream: Arc::new(Mutex::new(stream)),
+            cache: vec![].into(),
         }
     }
 
-    pub fn get_rdb(&mut self) -> Option<RDB> {
-        if self._cache.is_empty() && !self.fetch_stream() {
+    pub async fn get_rdb(&mut self) -> Option<RDB> {
+        if self.cache.is_empty() && !self.fetch_stream().await {
             None
         } else {
-            match self._cache.pop_front().unwrap() {
+            match self.cache.pop_front().unwrap() {
                 StreamToken::Rdb(rdb) => Some(rdb),
                 _default => None,
             }
         }
     }
-    pub fn get_resp(&mut self) -> Option<Message> {
-        if self._cache.is_empty() && !self.fetch_stream() {
+    pub async fn get_resp(&mut self) -> Option<Message> {
+        if self.cache.is_empty() && !self.fetch_stream().await {
             None
         } else {
-            match self._cache.pop_front().unwrap() {
+            match self.cache.pop_front().unwrap() {
                 StreamToken::Resp(resp) => Some(resp),
                 _default => None,
             }
         }
     }
-    fn fetch_stream(&mut self) -> bool {
+    async fn fetch_stream(&mut self) -> bool {
         let mut read_buf = [0; 256];
-        match self._stream.read(&mut read_buf) {
+        match self.stream.lock().await.read(&mut read_buf).await {
             Ok(length) => {
                 let mut probe = 0;
                 let data = &read_buf[..length];
@@ -631,7 +707,7 @@ impl ReplicaStream {
                         b'+' => StreamToken::Resp(Self::read_simple(data, &mut probe)),
                         _default => StreamToken::Resp(Self::read_array(data, &mut probe)),
                     };
-                    self._cache.push_back(token);
+                    self.cache.push_back(token);
                 }
                 true
             }

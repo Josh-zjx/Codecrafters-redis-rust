@@ -25,7 +25,7 @@ pub struct Message {
 
 impl Message {
     // Generate null bulk string message
-    pub fn null_blk_string() -> Self {
+    pub fn null() -> Self {
         Message {
             message_type: MessageType::Error,
             message: "".to_string(),
@@ -128,7 +128,7 @@ mod tests {
                 message: "".to_string(),
                 submessage: vec![]
             },
-            Message::null_blk_string()
+            Message::null()
         );
     }
 
@@ -195,10 +195,7 @@ mod tests {
 
     #[test]
     fn test_null_bulk_string_as_bytes() {
-        assert_eq!(
-            Message::null_blk_string().to_string().as_bytes(),
-            b"$-1\r\n"
-        )
+        assert_eq!(Message::null().to_string().as_bytes(), b"$-1\r\n")
     }
 
     #[test]
