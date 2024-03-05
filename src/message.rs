@@ -2,6 +2,12 @@ use std::str::FromStr;
 use std::string::ParseError;
 
 #[derive(Clone, Debug)]
+pub struct ReplicaMessage {
+    pub message: Message,
+    pub ack_timeout: u64,
+}
+
+#[derive(Clone, Debug)]
 pub struct Item {
     pub value: String,
     pub expire: u64,
@@ -25,6 +31,57 @@ pub struct Message {
 
 impl Message {
     // Generate null bulk string message
+    pub fn read_simple(data: &[u8], index: &mut usize) -> Message {
+        let mut probe = *index;
+        while probe + 1 < data.len() && !(data[probe] == b'\r' && data[probe + 1] == b'\n') {
+            probe += 1;
+        }
+        let parsed = Message::simple_string(
+            String::from_utf8(data[*index + 1..probe].to_vec())
+                .unwrap()
+                .as_str(),
+        );
+        *index = probe + 2;
+        parsed
+    }
+    pub fn read_bulk(data: &[u8], index: &mut usize) -> Message {
+        let mut probe = *index;
+        while probe + 1 < data.len() && !(data[probe] == b'\r' && data[probe + 1] == b'\n') {
+            probe += 1;
+        }
+        let length: usize = String::from_utf8(data[*index + 1..probe].to_vec())
+            .unwrap()
+            .parse()
+            .unwrap();
+        let message = Message::bulk_string(
+            String::from_utf8(data[probe + 2..probe + 2 + length].to_vec())
+                .unwrap()
+                .as_str(),
+        );
+        *index = probe + 4 + length;
+        message
+    }
+    pub fn read_array(data: &[u8], index: &mut usize) -> Message {
+        let mut probe = *index;
+        while probe + 1 < data.len() && !(data[probe] == b'\r' && data[probe + 1] == b'\n') {
+            probe += 1;
+        }
+        let length: usize = String::from_utf8(data[*index + 1..probe].to_vec())
+            .unwrap()
+            .parse()
+            .unwrap();
+        *index = probe + 2;
+        let mut message = Message::arrays(&[]);
+        for _ in 0..length {
+            let mess = match data[*index] {
+                b'$' => Self::read_bulk(data, index),
+                b'+' => Self::read_simple(data, index),
+                _default => Self::read_array(data, index),
+            };
+            message.submessage.push(mess);
+        }
+        message
+    }
     pub fn null() -> Self {
         Message {
             message_type: MessageType::Error,
@@ -63,6 +120,27 @@ impl Message {
             message_type: MessageType::Arrays,
             message: "".to_string(),
             submessage: messages.to_vec(),
+        }
+    }
+    pub fn operator(&self) -> Option<String> {
+        if let Some(oper) = self.submessage.first() {
+            Some(oper.message.to_lowercase())
+        } else {
+            None
+        }
+    }
+    pub fn first_arg(&self) -> Option<&str> {
+        if let Some(oper) = self.submessage.get(1) {
+            Some(oper.message.as_str())
+        } else {
+            None
+        }
+    }
+    pub fn second_arg(&self) -> Option<&str> {
+        if let Some(oper) = self.submessage.get(2) {
+            Some(oper.message.as_str())
+        } else {
+            None
         }
     }
 

@@ -14,6 +14,20 @@ pub struct RDB {
 }
 
 impl RDB {
+    pub fn read_rdb(data: &[u8], index: &mut usize) -> RDB {
+        let mut probe = *index;
+        while probe + 1 < data.len() && !(data[probe] == b'\r' && data[probe + 1] == b'\n') {
+            probe += 1;
+        }
+        let length: usize = String::from_utf8(data[*index + 1..probe].to_vec())
+            .unwrap()
+            .parse()
+            .unwrap();
+        let rdb = RDB::new();
+        rdb.load_data(&data[probe + 2..probe + 2 + length]);
+        *index = probe + 2 + length;
+        rdb
+    }
     fn read_header(&self, s: &[u8]) -> Option<usize> {
         if s.is_empty() {
             return None;
@@ -118,9 +132,9 @@ impl RDB {
         if file.read_to_end(&mut data).is_ok() {
             println!("Reading {} bytes from rdb file", &data.len());
         }
-        self.read_rdb(&data);
+        self.load_data(&data);
     }
-    pub fn read_rdb(&self, data: &[u8]) {
+    pub fn load_data(&self, data: &[u8]) {
         let mut res = self.read_header(data);
         while let Some(index) = res {
             res = self.read_data(data, index);
@@ -135,7 +149,7 @@ impl RDB {
         rdb
     }
 
-    pub fn load_rdb_from_stream(&self, stream: &mut TcpStream) {
+    pub fn _load_rdb_from_stream(&self, stream: &mut TcpStream) {
         let mut read_buf = [0; 256];
         let mut length = stream.read(&mut read_buf).unwrap();
         while length == 0 {
@@ -144,14 +158,14 @@ impl RDB {
         println!("got {} bytes of RDB file", length);
         stream.flush().unwrap();
         let data = &read_buf[..length];
-        self.read_rdb(data);
+        self.load_data(data);
     }
-    pub fn read_rdb_from_stream(stream: &mut TcpStream) -> Self {
+    pub fn _read_rdb_from_stream(stream: &mut TcpStream) -> Self {
         let rdb = RDB {
             _storage: RwLock::new(BTreeMap::new()),
             _db_selector: 0,
         };
-        rdb.load_rdb_from_stream(stream);
+        rdb._load_rdb_from_stream(stream);
         rdb
     }
     //pub fn read_rdb_from_stream(stream: &TcpStream) -> Self {}
