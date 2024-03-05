@@ -2,19 +2,17 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::prelude::*;
 use std::net::TcpStream;
-use std::sync::RwLock;
-//use std::net::TcpStream;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::RwLock;
 
-use crate::message::*;
-pub struct RDB {
-    pub _storage: RwLock<BTreeMap<String, Item>>,
+use crate::*;
+pub struct Database {
+    pub storage: RwLock<BTreeMap<String, Item>>,
     pub _db_selector: usize,
 }
 
-impl RDB {
-    pub fn read_rdb(data: &[u8], index: &mut usize) -> RDB {
+impl Database {
+    pub fn read_rdb(data: &[u8], index: &mut usize) -> Database {
         let mut probe = *index;
         while probe + 1 < data.len() && !(data[probe] == b'\r' && data[probe + 1] == b'\n') {
             probe += 1;
@@ -23,7 +21,7 @@ impl RDB {
             .unwrap()
             .parse()
             .unwrap();
-        let rdb = RDB::new();
+        let rdb = Database::new();
         rdb.load_data(&data[probe + 2..probe + 2 + length]);
         *index = probe + 2 + length;
         rdb
@@ -54,7 +52,7 @@ impl RDB {
         }
 
         let mut index = index;
-        let mut item = Item {
+        let mut item = KvItem {
             value: "".to_string(),
             expire: 0,
         };
@@ -85,16 +83,13 @@ impl RDB {
             item.value = String::from_utf8(s[nindex..nindex + length].to_vec()).unwrap();
 
             // Discard expired data here
-            if item.expire != 0
-                && item.expire
-                    < SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64
-            {
+            if item.expire != 0 && item.expire < now_u64() {
                 println!("Value expired");
             } else {
-                self._storage.write().unwrap().insert(key, item);
+                self.storage
+                    .write()
+                    .unwrap()
+                    .insert(key, Item::KvItem(item));
             }
             Some(nindex + length)
         } else {
@@ -102,8 +97,8 @@ impl RDB {
         }
     }
     pub fn new() -> Self {
-        RDB {
-            _storage: RwLock::new(BTreeMap::new()),
+        Database {
+            storage: RwLock::new(BTreeMap::new()),
             _db_selector: 0,
         }
     }
@@ -141,10 +136,7 @@ impl RDB {
         }
     }
     pub fn read_rdb_from_file(dbfilename: String) -> Self {
-        let rdb = RDB {
-            _storage: RwLock::new(BTreeMap::new()),
-            _db_selector: 0,
-        };
+        let rdb = Self::new();
         rdb.load_rdb_from_file(dbfilename);
         rdb
     }
@@ -161,10 +153,7 @@ impl RDB {
         self.load_data(data);
     }
     pub fn _read_rdb_from_stream(stream: &mut TcpStream) -> Self {
-        let rdb = RDB {
-            _storage: RwLock::new(BTreeMap::new()),
-            _db_selector: 0,
-        };
+        let rdb = Self::new();
         rdb._load_rdb_from_stream(stream);
         rdb
     }
@@ -183,8 +172,8 @@ impl RDB {
         [format!("${}\r\n", &rdb.len()).as_bytes(), &rdb].concat()
     }
 }
-impl Default for RDB {
+impl Default for Database {
     fn default() -> Self {
-        RDB::new()
+        Database::new()
     }
 }

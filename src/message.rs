@@ -7,12 +7,22 @@ pub struct ReplicaMessage {
     pub ack_timeout: u64,
 }
 
-#[derive(Clone, Debug)]
-pub struct Item {
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub struct KvItem {
     pub value: String,
     pub expire: u64,
 }
 
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub struct StreamItem {
+    pub value: Vec<(String, Vec<String>)>,
+}
+
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub enum Item {
+    KvItem(KvItem),
+    StreamItem(StreamItem),
+}
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum MessageType {
     SimpleString,

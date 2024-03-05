@@ -80,13 +80,13 @@ impl ReplicaStream {
         }
     }
 
-    pub async fn get_rdb(&mut self) -> Option<RDB> {
+    pub async fn get_rdb(&mut self) -> Option<Database> {
         if self.cache.is_empty() && !self.fetch_stream().await {
-            Some(RDB::new())
+            Some(Database::new())
         } else {
             match self.cache.pop_front().unwrap() {
                 StreamToken::Rdb(rdb) => Some(rdb),
-                _default => Some(RDB::new()),
+                _default => Some(Database::new()),
             }
         }
     }
@@ -108,7 +108,7 @@ impl ReplicaStream {
                 let data = &read_buf[..length];
                 while probe < data.len() {
                     let token = match data[probe] {
-                        b'$' => StreamToken::Rdb(RDB::read_rdb(data, &mut probe)),
+                        b'$' => StreamToken::Rdb(Database::read_rdb(data, &mut probe)),
                         b'+' => StreamToken::Resp(Message::read_simple(data, &mut probe)),
                         _default => StreamToken::Resp(Message::read_array(data, &mut probe)),
                     };
@@ -121,7 +121,7 @@ impl ReplicaStream {
     }
 }
 pub enum StreamToken {
-    Rdb(RDB),
+    Rdb(Database),
     Resp(Message),
 }
 

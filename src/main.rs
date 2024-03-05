@@ -56,14 +56,14 @@ async fn _send_hand_shake(config: &ServerConfig) -> Result<ReplicaStream, &str> 
     Ok(repstream)
 }
 
-async fn handle_client(stream: TcpStream, database: Arc<RDB>, config: Arc<ServerConfig>) {
+async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<ServerConfig>) {
     let mut stream = MessageStream::bind(stream);
     //let mut storage = BTreeMap::<String, Item>::new();
     let mut fullresync = false;
     loop {
         if fullresync {
             {
-                let _ = stream.write(&RDB::fullresync_rdb()).await;
+                let _ = stream.write(&Database::fullresync_rdb()).await;
             }
             let (replica_handle, _handle) = master_slave_channel(stream);
             config
@@ -83,16 +83,20 @@ async fn handle_client(stream: TcpStream, database: Arc<RDB>, config: Arc<Server
             "ping" => Message::simple_string("PONG"),
             "echo" => Message::bulk_string(request_message.first_arg().unwrap()),
             "get" => {
-                let storage = database._storage.read().unwrap();
+                let storage = database.storage.read().unwrap();
                 let key = &request_message.first_arg().unwrap();
                 match &storage.get(&key.to_string()) {
                     Some(data) => {
-                        let resp = &data.value;
-                        let exp = data.expire;
-                        if exp != 0 && exp < now_u64() {
-                            Message::null()
+                        if let Item::KvItem(data) = data {
+                            let resp = &data.value;
+                            let exp = data.expire;
+                            if exp != 0 && exp < now_u64() {
+                                Message::null()
+                            } else {
+                                Message::bulk_string(resp.as_str())
+                            }
                         } else {
-                            Message::bulk_string(resp.as_str())
+                            Message::null()
                         }
                     }
                     None => Message::null(),
@@ -117,7 +121,7 @@ async fn handle_client(stream: TcpStream, database: Arc<RDB>, config: Arc<Server
                 }
                 *config.master_repl_offset.write().unwrap() +=
                     request_message.to_string().as_bytes().len() as u64;
-                let mut new_data = Item {
+                let mut new_data = KvItem {
                     value: request_message.second_arg().unwrap().to_string(),
                     expire: 0,
                 };
@@ -142,10 +146,10 @@ async fn handle_client(stream: TcpStream, database: Arc<RDB>, config: Arc<Server
                         println!("Not Important");
                     }
                 }
-                let mut storage = database._storage.write().unwrap();
+                let mut storage = database.storage.write().unwrap();
                 storage.insert(
                     request_message.submessage.get(1).unwrap().message.clone(),
-                    new_data,
+                    Item::KvItem(new_data),
                 );
                 println!("return to client");
                 Message::simple_string("OK")
@@ -173,7 +177,7 @@ async fn handle_client(stream: TcpStream, database: Arc<RDB>, config: Arc<Server
             }
             "keys" => {
                 if request_message.first_arg().unwrap() == "*" {
-                    let storage = database._storage.read().unwrap();
+                    let storage = database.storage.read().unwrap();
                     let keys = storage.keys();
                     let mut response = Message {
                         message_type: MessageType::Arrays,
@@ -181,11 +185,13 @@ async fn handle_client(stream: TcpStream, database: Arc<RDB>, config: Arc<Server
                         submessage: vec![],
                     };
                     for i in keys {
-                        let exp = storage.get(i).unwrap().expire;
-                        if exp != 0 && exp < now_u64() {
-                            println!("data expired");
-                        } else {
-                            response.submessage.push(Message::bulk_string(i));
+                        if let Item::KvItem(item) = storage.get(i).unwrap() {
+                            let exp = item.expire;
+                            if exp != 0 && exp < now_u64() {
+                                println!("data expired");
+                            } else {
+                                response.submessage.push(Message::bulk_string(i));
+                            }
                         }
                     }
                     response
@@ -258,31 +264,6 @@ async fn handle_client(stream: TcpStream, database: Arc<RDB>, config: Arc<Server
                                 })
                                 .await;
                         }
-                        /*
-                                                let (tx, mut rx) = mpsc::channel::<bool>(15);
-                                                for _slave in config.master_slave_channels.lock().await.iter_mut() {
-                                                    let slave = _slave.clone();
-
-                                                    let tx = tx.clone();
-                                                    let _ = tokio::spawn(async move {
-                                                        if let Err(_) = timeout(
-                                                            time::Duration::from_millis(resp_timeout),
-                                                            slave.lock().await.rx.recv(),
-                                                        )
-                                                        .await
-                                                        {
-                                                            let _ = tx.send(false).await;
-                                                        } else {
-                                                            let _ = tx.send(true).await;
-                                                        }
-                                                    });
-                                                }
-                        for _ in 0..config.master_slave_channels.lock().await.len() {
-                            if rx.recv().await.unwrap() {
-                                count += 1
-                            }
-                        }
-                        */
                         for slave in config.master_slave_channels.lock().await.iter_mut() {
                             let res = slave.lock().await.rx.recv().await.unwrap();
                             if res.ack_timeout == 0 {
@@ -294,16 +275,44 @@ async fn handle_client(stream: TcpStream, database: Arc<RDB>, config: Arc<Server
                 }
             }
             "type" => {
-                let key = request_message.submessage.get(1).unwrap().message.clone();
-                if let Ok(storage) = database._storage.read() {
+                let key = request_message.first_arg().unwrap().to_string();
+                if let Ok(storage) = database.storage.read() {
                     if storage.contains_key(&key) {
-                        Message::simple_string("string")
+                        match storage.get(&key).unwrap() {
+                            Item::KvItem(_) => Message::simple_string("string"),
+                            Item::StreamItem(_) => Message::simple_string("stream"),
+                        }
                     } else {
                         Message::simple_string("none")
                     }
                 } else {
                     Message::null()
                 }
+            }
+            "xadd" => {
+                let key = request_message.first_arg().unwrap().to_string();
+                let stream_id = request_message.second_arg().unwrap().to_string();
+                let stream_value: Vec<String> = request_message.submessage[2..]
+                    .to_vec()
+                    .into_iter()
+                    .map(|x| x.message)
+                    .collect();
+
+                if let Ok(mut storage) = database.storage.write() {
+                    storage
+                        .entry(key)
+                        .and_modify(|x| match x {
+                            Item::StreamItem(x) => {
+                                x.value.push((stream_id.clone(), stream_value.clone()));
+                            }
+                            _default => {}
+                        })
+                        .or_insert(Item::StreamItem(StreamItem {
+                            value: vec![(stream_id.clone(), stream_value)],
+                        }));
+                };
+
+                Message::bulk_string(stream_id.as_str())
             }
             _default => Message::null(),
         };
@@ -333,27 +342,27 @@ async fn main() {
         });
         handlers.push(handler);
 
-        if let Ok(mut storage) = database_ref._storage.write() {
+        if let Ok(mut storage) = database_ref.storage.write() {
             storage.insert(
                 "foo".to_string(),
-                Item {
+                Item::KvItem(KvItem {
                     value: "123".to_string(),
                     expire: 0,
-                },
+                }),
             );
             storage.insert(
                 "bar".to_string(),
-                Item {
+                Item::KvItem(KvItem {
                     value: "456".to_string(),
                     expire: 0,
-                },
+                }),
             );
             storage.insert(
                 "baz".to_string(),
-                Item {
+                Item::KvItem(KvItem {
                     value: "789".to_string(),
                     expire: 0,
-                },
+                }),
             );
         };
         println!("Returning to normal operations");
@@ -369,7 +378,8 @@ async fn main() {
             }
         }
     } else {
-        let database = RDB::read_rdb_from_file(format!("{}/{}", config.dir, config.dbfilename));
+        let database =
+            Database::read_rdb_from_file(format!("{}/{}", config.dir, config.dbfilename));
         let database_ref = Arc::new(database);
         loop {
             let stream = listener.accept().await;
@@ -387,7 +397,11 @@ async fn main() {
 
     //println!("database length: {}", _database._storage.len());
 }
-async fn handle_master(mut stream: ReplicaStream, database: Arc<RDB>, _config: Arc<ServerConfig>) {
+async fn handle_master(
+    mut stream: ReplicaStream,
+    database: Arc<Database>,
+    _config: Arc<ServerConfig>,
+) {
     //let mut storage = BTreeMap::<String, Item>::new();
     loop {
         let resp = stream.get_resp().await.unwrap();
@@ -395,7 +409,7 @@ async fn handle_master(mut stream: ReplicaStream, database: Arc<RDB>, _config: A
         let byte_length = resp.to_string().as_bytes().len() as u64;
         match resp.operator().unwrap().as_str() {
             "set" => {
-                let mut new_data = Item {
+                let mut new_data = KvItem {
                     value: resp.submessage.get(2).unwrap().message.clone(),
                     expire: 0,
                 };
@@ -413,8 +427,11 @@ async fn handle_master(mut stream: ReplicaStream, database: Arc<RDB>, _config: A
                         println!("Not Important");
                     }
                 }
-                if let Ok(mut storage) = database._storage.write() {
-                    storage.insert(resp.submessage.get(1).unwrap().message.clone(), new_data);
+                if let Ok(mut storage) = database.storage.write() {
+                    storage.insert(
+                        resp.submessage.get(1).unwrap().message.clone(),
+                        Item::KvItem(new_data),
+                    );
                 }
             }
             // Master-Slave handler begins here
