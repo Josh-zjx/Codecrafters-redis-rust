@@ -1,4 +1,5 @@
 use core::time;
+use itertools::Itertools;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
@@ -104,7 +105,6 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
             }
 
             "set" => {
-                println!("get new set");
                 {
                     for slave in config.master_slave_channels.lock().await.iter_mut() {
                         let _ = slave
@@ -117,7 +117,6 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                             })
                             .await;
                     }
-                    println!("recasting to downstream {:?}", request_message)
                 }
                 *config.master_repl_offset.write().unwrap() +=
                     request_message.to_string().as_bytes().len() as u64;
@@ -223,12 +222,18 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                 _default => Message::simple_string("OK"),
             },
             "psync" => {
-                if request_message.submessage.get(1).unwrap().message == "?" {
-                    fullresync = true;
-                    Message::simple_string(format!("FULLRESYNC {} 0", &config.master_id).as_str())
-                } else {
-                    Message::simple_string("OK")
-                }
+                fullresync = true;
+                Message::simple_string(format!("FULLRESYNC {} 0", &config.master_id).as_str())
+                /*
+                                if request_message.first_arg().unwrap() == "?"
+                                    || request_message.first_arg().unwrap() == "-1"
+                                {
+                                    fullresync = true;
+                                    Message::simple_string(format!("FULLRESYNC {} 0", &config.master_id).as_str())
+                                } else {
+                                    Message::simple_string("OK")
+                                }
+                */
             }
             "wait" => {
                 if *config.master_repl_offset.read().unwrap() == 0 {
@@ -292,30 +297,59 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
             "xadd" => {
                 let key = request_message.first_arg().unwrap().to_string();
                 let stream_id = request_message.second_arg().unwrap().to_string();
-                let stream_value: Vec<String> = request_message.submessage[2..]
+                let stream_value: Vec<String> = request_message.submessage[3..]
                     .to_vec()
                     .into_iter()
                     .map(|x| x.message)
                     .collect();
 
                 if let Ok(mut storage) = database.storage.write() {
-                    storage
-                        .entry(key)
-                        .and_modify(|x| match x {
-                            Item::StreamItem(x) => {
-                                x.value.push((stream_id.clone(), stream_value.clone()));
+                    if let Some(mut _item) = storage.get_mut(&key) {
+                        match _item {
+                            Item::StreamItem(ref mut item) => {
+                                let last_id = &item.value.last().unwrap().0;
+                                let last_time_id: (u64, u64) = last_id
+                                    .split("-")
+                                    .map(|x| x.parse::<u64>().unwrap())
+                                    .take(2)
+                                    .collect_tuple()
+                                    .unwrap();
+                                let curr_time_id: (u64, u64) = stream_id
+                                    .split("-")
+                                    .map(|x| x.parse::<u64>().unwrap())
+                                    .take(2)
+                                    .collect_tuple()
+                                    .unwrap();
+                                if curr_time_id <= (0, 0) {
+                                    Message::error(
+                                        "ERR The ID specified in XADD must be greater than 0-0",
+                                    )
+                                } else if curr_time_id > last_time_id {
+                                    item.value.push((stream_id.clone(), stream_value.clone()));
+                                    Message::bulk_string(stream_id.as_str())
+                                } else {
+                                    //println!("Error, getting same stream timestamp");
+                                    Message::error("ERR The ID specified in XADD is equal or smaller than the target stream top item")
+                                }
                             }
-                            _default => {}
-                        })
-                        .or_insert(Item::StreamItem(StreamItem {
-                            value: vec![(stream_id.clone(), stream_value)],
-                        }));
-                };
-
-                Message::bulk_string(stream_id.as_str())
+                            _default => Message::null(),
+                        }
+                    } else {
+                        storage.insert(
+                            key,
+                            Item::StreamItem(StreamItem {
+                                value: vec![(stream_id.clone(), stream_value)],
+                            }),
+                        );
+                        Message::bulk_string(stream_id.as_str())
+                    }
+                } else {
+                    Message::null()
+                }
             }
             _default => Message::null(),
         };
+        //println!("Writing {:?}", response);
         let _write_result = stream.write_message(response).await;
     }
 }
@@ -386,7 +420,6 @@ async fn main() {
             let config_ref = Arc::clone(&config);
             let database_ref = Arc::clone(&database_ref);
             if let Ok((stream, _)) = stream {
-                println!("getting new incoming client");
                 let handler = tokio::spawn(async move {
                     handle_client(stream, database_ref, config_ref).await;
                 });
@@ -394,8 +427,6 @@ async fn main() {
             }
         }
     }
-
-    //println!("database length: {}", _database._storage.len());
 }
 async fn handle_master(
     mut stream: ReplicaStream,
@@ -405,7 +436,6 @@ async fn handle_master(
     //let mut storage = BTreeMap::<String, Item>::new();
     loop {
         let resp = stream.get_resp().await.unwrap();
-        println!("{:?}", resp.submessage);
         let byte_length = resp.to_string().as_bytes().len() as u64;
         match resp.operator().unwrap().as_str() {
             "set" => {
@@ -464,7 +494,6 @@ pub fn master_slave_channel(mut stream: MessageStream) -> (ReplicaHandle, JoinHa
         loop {
             while let Some(upstream_message) = rx.recv().await {
                 let _ = stream.write_message(upstream_message.message).await;
-                println!("recasting upstream message");
                 if upstream_message.ack_timeout != 0 {
                     if let Err(_) = tokio::time::timeout(
                         time::Duration::from_millis(upstream_message.ack_timeout),

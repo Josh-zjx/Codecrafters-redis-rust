@@ -28,8 +28,9 @@ pub enum MessageType {
     SimpleString,
     BulkString,
     Arrays,
-    Error,
+    Null,
     Integer,
+    Error,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -94,13 +95,20 @@ impl Message {
     }
     pub fn null() -> Self {
         Message {
-            message_type: MessageType::Error,
+            message_type: MessageType::Null,
             message: "".to_string(),
             submessage: vec![],
         }
     }
 
-    // Generate simple string message
+    // Generate simple error message
+    pub fn error(message: &str) -> Self {
+        Message {
+            message_type: MessageType::Error,
+            message: message.to_string(),
+            submessage: vec![],
+        }
+    }
     pub fn simple_string(message: &str) -> Self {
         Message {
             message_type: MessageType::SimpleString,
@@ -182,7 +190,7 @@ impl ToString for Message {
     // Generate string from message
     fn to_string(&self) -> String {
         match &self.message_type {
-            MessageType::Error => "$-1\r\n".to_string(),
+            MessageType::Null => "$-1\r\n".to_string(),
             MessageType::BulkString => {
                 format!("${}\r\n{}\r\n", &self.message.len(), self.message)
             }
@@ -200,6 +208,9 @@ impl ToString for Message {
                 }
                 response_string
             }
+            MessageType::Error => {
+                format!("-{}\r\n", self.message)
+            }
         }
     }
 }
@@ -212,7 +223,7 @@ mod tests {
     fn test_null_bulk_string() {
         assert_eq!(
             Message {
-                message_type: MessageType::Error,
+                message_type: MessageType::Null,
                 message: "".to_string(),
                 submessage: vec![]
             },
