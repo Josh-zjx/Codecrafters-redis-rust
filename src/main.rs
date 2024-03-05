@@ -17,6 +17,36 @@ fn now_u64() -> u64 {
         .unwrap()
         .as_millis() as u64
 }
+fn valid_stream_id(prev: String, curr: String) -> String {
+    let prev_time_id: (u64, u64) = prev
+        .split("-")
+        .map(|x| x.parse::<u64>().unwrap())
+        .take(2)
+        .collect_tuple()
+        .unwrap();
+    let curr_time_id: (String, String) = curr
+        .split("-")
+        .take(2)
+        .map(str::to_string)
+        .collect_tuple()
+        .unwrap();
+    if curr_time_id.0 != "*" {
+        let curr_time = curr_time_id.0.parse::<u64>().unwrap();
+        if curr_time_id.1 == "*" {
+            if curr_time > prev_time_id.0 {
+                format!("{}-{}", curr_time_id.0, 0)
+            } else if curr_time == prev_time_id.0 {
+                format!("{}-{}", curr_time_id.0, prev_time_id.1 + 1)
+            } else {
+                format!("{}-{}", curr_time_id.0, prev_time_id.1)
+            }
+        } else {
+            curr
+        }
+    } else {
+        curr
+    }
+}
 
 async fn _send_hand_shake(config: &ServerConfig) -> Result<ReplicaStream, &str> {
     let stream = TcpStream::connect(config.master_ip_port.clone().unwrap())
@@ -304,6 +334,9 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                     .collect();
 
                 if let Ok(mut storage) = database.storage.write() {
+                    let time_id: (&str, &str) =
+                        stream_id.split("-").take(2).collect_tuple().unwrap();
+                    if time_id.1 == "*" {}
                     if let Some(mut _item) = storage.get_mut(&key) {
                         match _item {
                             Item::StreamItem(ref mut item) => {
@@ -314,6 +347,7 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                                     .take(2)
                                     .collect_tuple()
                                     .unwrap();
+                                let stream_id = valid_stream_id(last_id.to_owned(), stream_id);
                                 let curr_time_id: (u64, u64) = stream_id
                                     .split("-")
                                     .map(|x| x.parse::<u64>().unwrap())
@@ -335,6 +369,7 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                             _default => Message::null(),
                         }
                     } else {
+                        let stream_id = valid_stream_id("0-0".to_string(), stream_id);
                         storage.insert(
                             key,
                             Item::StreamItem(StreamItem {
