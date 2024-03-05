@@ -24,6 +24,11 @@ fn valid_stream_id(prev: String, curr: String) -> String {
         .take(2)
         .collect_tuple()
         .unwrap();
+    let curr = if curr == "*" {
+        format!("{}-*", now_u64())
+    } else {
+        curr
+    };
     let curr_time_id: (String, String) = curr
         .split("-")
         .take(2)
@@ -334,9 +339,6 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                     .collect();
 
                 if let Ok(mut storage) = database.storage.write() {
-                    let time_id: (&str, &str) =
-                        stream_id.split("-").take(2).collect_tuple().unwrap();
-                    if time_id.1 == "*" {}
                     if let Some(mut _item) = storage.get_mut(&key) {
                         match _item {
                             Item::StreamItem(ref mut item) => {
