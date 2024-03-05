@@ -17,15 +17,23 @@ fn now_u64() -> u64 {
         .unwrap()
         .as_millis() as u64
 }
-fn valid_stream_id(prev: String, curr: String) -> String {
-    let prev_time_id: (u64, u64) = prev
+fn parse_stream_id(stream_id: &str) -> (u64, u64) {
+    stream_id
         .split("-")
         .map(|x| x.parse::<u64>().unwrap())
         .take(2)
         .collect_tuple()
-        .unwrap();
+        .unwrap()
+}
+fn valid_stream_id(prev: String, curr: String) -> String {
+    let prev_time_id: (u64, u64) = parse_stream_id(&prev);
     let curr = if curr == "*" {
         format!("{}-*", now_u64())
+    } else {
+        curr
+    };
+    let curr = if !curr.contains("-") {
+        format!("{}-*", curr)
     } else {
         curr
     };
@@ -382,6 +390,48 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                     }
                 } else {
                     Message::null()
+                }
+            }
+            "xrange" => {
+                let storage = database.storage.read().unwrap();
+                let key = &request_message.first_arg().unwrap();
+                match &storage.get(&key.to_string()) {
+                    Some(data) => {
+                        if let Item::StreamItem(data) = data {
+                            let start_stamp = &request_message.submessage.get(2).unwrap().message;
+                            let start_stamp =
+                                valid_stream_id("0-0".to_string(), start_stamp.to_owned());
+                            let end_stamp = &request_message.submessage.get(3).unwrap().message;
+                            let end_stamp =
+                                valid_stream_id("0-0".to_string(), end_stamp.to_owned());
+                            let mut resp = Message::arrays(&[]);
+
+                            for i in data.value.iter() {
+                                if parse_stream_id(&i.0) >= parse_stream_id(&start_stamp)
+                                    && parse_stream_id(&i.0) <= parse_stream_id(&end_stamp)
+                                {
+                                    let mut _resp = Message::arrays(&[
+                                        Message::bulk_string(&i.0),
+                                        Message::arrays(&[]),
+                                    ]);
+                                    for j in i.1.iter() {
+                                        _resp
+                                            .submessage
+                                            .get_mut(1)
+                                            .unwrap()
+                                            .submessage
+                                            .push(Message::bulk_string(j))
+                                    }
+                                    resp.submessage.push(_resp);
+                                }
+                            }
+
+                            resp
+                        } else {
+                            Message::null()
+                        }
+                    }
+                    None => Message::null(),
                 }
             }
             _default => Message::null(),
