@@ -31,6 +31,9 @@ fn valid_stream_id(prev: String, curr: String) -> String {
     } else {
         curr
     };
+    if curr == "$" {
+        return prev;
+    };
     if curr == "-" {
         return format!("{}-{}", 0, 0);
     };
@@ -48,18 +51,14 @@ fn valid_stream_id(prev: String, curr: String) -> String {
         .map(str::to_string)
         .collect_tuple()
         .unwrap();
-    if curr_time_id.0 != "*" {
-        let curr_time = curr_time_id.0.parse::<u64>().unwrap();
-        if curr_time_id.1 == "*" {
-            if curr_time > prev_time_id.0 {
-                format!("{}-{}", curr_time_id.0, 0)
-            } else if curr_time == prev_time_id.0 {
-                format!("{}-{}", curr_time_id.0, prev_time_id.1 + 1)
-            } else {
-                format!("{}-{}", curr_time_id.0, prev_time_id.1)
-            }
+    let curr_time = curr_time_id.0.parse::<u64>().unwrap();
+    if curr_time_id.1 == "*" {
+        if curr_time > prev_time_id.0 {
+            format!("{}-{}", curr_time_id.0, 0)
+        } else if curr_time == prev_time_id.0 {
+            format!("{}-{}", curr_time_id.0, prev_time_id.1 + 1)
         } else {
-            curr
+            format!("{}-{}", curr_time_id.0, prev_time_id.1)
         }
     } else {
         curr
@@ -469,41 +468,65 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                 } else {
                     None
                 };
+                let query_length = (request_message.submessage.len() - 2 - block_offset) / 2;
+                let mut key_ids = vec![];
+                let mut stream_ids = vec![];
+                for k in 0..query_length {
+                    let key = request_message
+                        .submessage
+                        .get(block_offset + 2 + k)
+                        .unwrap()
+                        .message
+                        .clone();
+                    let target_stamp = request_message
+                        .submessage
+                        .get(block_offset + 2 + query_length + k)
+                        .unwrap()
+                        .message
+                        .clone();
+
+                    let start_stamp: String = if let Ok(storage) = database.storage.read() {
+                        match &storage.get(&key.to_string()) {
+                            Some(data) => {
+                                if let Item::StreamItem(data) = data {
+                                    if target_stamp != "$" {
+                                        valid_stream_id("0-0".to_string(), target_stamp.to_string())
+                                    } else {
+                                        if let Some(last) = data.value.last() {
+                                            last.0.to_string()
+                                        } else {
+                                            "0-0".to_string()
+                                        }
+                                    }
+                                } else {
+                                    "".to_string()
+                                }
+                            }
+                            None => "".to_string(),
+                        }
+                    } else {
+                        "".to_string()
+                    };
+
+                    key_ids.push(key);
+                    stream_ids.push(start_stamp);
+                }
                 let result = loop {
                     let mut final_resp = Message::arrays(&[]);
-                    let query_length = (request_message.submessage.len() - 2 - block_offset) / 2;
                     for k in 0..query_length {
-                        let key = request_message
-                            .submessage
-                            .get(block_offset + 2 + k)
-                            .unwrap()
-                            .message
-                            .clone();
-                        let target_stamp = &request_message
-                            .submessage
-                            .get(block_offset + 2 + query_length + k)
-                            .unwrap()
-                            .message
-                            .clone();
-
                         if let Ok(storage) = database.storage.read() {
+                            let key = key_ids.get(k).unwrap();
+                            let start_stamp = stream_ids.get(k).unwrap();
                             let mut _key_level = Message::arrays(&[Message::bulk_string(&key)]);
                             let stream_body = match &storage.get(&key.to_string()) {
                                 Some(data) => {
                                     if let Item::StreamItem(data) = data {
-                                        let start_stamp = valid_stream_id(
-                                            "0-0".to_string(),
-                                            target_stamp.to_owned(),
-                                        );
-                                        let end_stamp =
-                                            valid_stream_id("0-0".to_string(), "+".to_string());
                                         let mut resp = Message::arrays(&[]);
 
                                         for i in data.value.iter() {
                                             if parse_stream_id(&i.0) > parse_stream_id(&start_stamp)
-                                                && parse_stream_id(&i.0)
-                                                    <= parse_stream_id(&end_stamp)
                                             {
+                                                println!("{:?} > {:?}", &i.0, &start_stamp);
                                                 let mut _resp = Message::arrays(&[
                                                     Message::bulk_string(&i.0),
                                                     Message::arrays(&[]),
