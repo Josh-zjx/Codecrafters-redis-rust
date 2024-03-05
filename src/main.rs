@@ -546,7 +546,7 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                         }
                     }
                 };
-                println!("writing {:?}", result);
+                // println!("writing {:?}", result);
                 result
             }
             _default => Message::null(),
