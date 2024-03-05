@@ -18,7 +18,7 @@ fn now_u64() -> u64 {
 }
 fn parse_stream_id(stream_id: &str) -> (u64, u64) {
     stream_id
-        .split("-")
+        .split('-')
         .map(|x| x.parse::<u64>().unwrap())
         .take(2)
         .collect_tuple()
@@ -40,13 +40,13 @@ fn valid_stream_id(prev: String, curr: String) -> String {
     if curr == "+" {
         return format!("{}-{}", u64::MAX, u64::MAX);
     };
-    let curr = if !curr.contains("-") {
+    let curr = if !curr.contains('-') {
         format!("{}-*", curr)
     } else {
         curr
     };
     let curr_time_id: (String, String) = curr
-        .split("-")
+        .split('-')
         .take(2)
         .map(str::to_string)
         .collect_tuple()
@@ -106,7 +106,6 @@ async fn _send_hand_shake(config: &ServerConfig) -> Result<ReplicaStream, &str> 
 
 async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<ServerConfig>) {
     let mut stream = MessageStream::bind(stream);
-    //let mut storage = BTreeMap::<String, Item>::new();
     let mut fullresync = false;
     loop {
         if fullresync {
@@ -121,9 +120,6 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                 .push(Arc::new(tokio::sync::Mutex::new(replica_handle)));
             let _ = _handle.await;
             return;
-
-            // fullresync = false;
-            // continue;
         }
         let request_message = stream.read_message().await.unwrap();
 
@@ -197,7 +193,6 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                     request_message.submessage.get(1).unwrap().message.clone(),
                     Item::KvItem(new_data),
                 );
-                println!("return to client");
                 Message::simple_string("OK")
             }
             "config" => {
@@ -271,29 +266,11 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
             "psync" => {
                 fullresync = true;
                 Message::simple_string(format!("FULLRESYNC {} 0", &config.master_id).as_str())
-                /*
-                                if request_message.first_arg().unwrap() == "?"
-                                    || request_message.first_arg().unwrap() == "-1"
-                                {
-                                    fullresync = true;
-                                    Message::simple_string(format!("FULLRESYNC {} 0", &config.master_id).as_str())
-                                } else {
-                                    Message::simple_string("OK")
-                                }
-                */
             }
             "wait" => {
                 if *config.master_repl_offset.read().unwrap() == 0 {
                     Message::integer(config.master_slave_channels.lock().await.len() as u64)
                 } else {
-                    let needed_num: usize = request_message
-                        .submessage
-                        .get(1)
-                        .unwrap()
-                        .message
-                        .parse()
-                        .unwrap();
-                    println!("Needed Ack :{}", needed_num);
                     let mut count = 0;
                     let resp_timeout = request_message
                         .second_arg()
@@ -355,19 +332,9 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                         match _item {
                             Item::StreamItem(ref mut item) => {
                                 let last_id = &item.value.last().unwrap().0;
-                                let last_time_id: (u64, u64) = last_id
-                                    .split("-")
-                                    .map(|x| x.parse::<u64>().unwrap())
-                                    .take(2)
-                                    .collect_tuple()
-                                    .unwrap();
+                                let last_time_id: (u64, u64) = parse_stream_id(last_id);
                                 let stream_id = valid_stream_id(last_id.to_owned(), stream_id);
-                                let curr_time_id: (u64, u64) = stream_id
-                                    .split("-")
-                                    .map(|x| x.parse::<u64>().unwrap())
-                                    .take(2)
-                                    .collect_tuple()
-                                    .unwrap();
+                                let curr_time_id: (u64, u64) = parse_stream_id(&stream_id);
                                 if curr_time_id <= (0, 0) {
                                     Message::error(
                                         "ERR The ID specified in XADD must be greater than 0-0",
@@ -376,7 +343,6 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                                     item.value.push((stream_id.clone(), stream_value.clone()));
                                     Message::bulk_string(stream_id.as_str())
                                 } else {
-                                    //println!("Error, getting same stream timestamp");
                                     Message::error("ERR The ID specified in XADD is equal or smaller than the target stream top item")
                                 }
                             }
@@ -416,16 +382,12 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                                 {
                                     let mut _resp = Message::arrays(&[
                                         Message::bulk_string(&i.0),
-                                        Message::arrays(&[]),
+                                        Message::arrays(
+                                            &i.1.iter()
+                                                .map(|x| Message::bulk_string(x))
+                                                .collect_vec(),
+                                        ),
                                     ]);
-                                    for j in i.1.iter() {
-                                        _resp
-                                            .submessage
-                                            .get_mut(1)
-                                            .unwrap()
-                                            .submessage
-                                            .push(Message::bulk_string(j))
-                                    }
                                     resp.submessage.push(_resp);
                                 }
                             }
@@ -446,25 +408,13 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                 };
                 let mut wait = false;
                 let block_timeout = if block_offset == 2 {
-                    wait = if request_message
+                    let second_arg = request_message
                         .second_arg()
                         .unwrap()
                         .parse::<u64>()
-                        .unwrap()
-                        == 0
-                    {
-                        true
-                    } else {
-                        false
-                    };
-                    Some(
-                        request_message
-                            .second_arg()
-                            .unwrap()
-                            .parse::<u64>()
-                            .unwrap()
-                            + now_u64(),
-                    )
+                        .unwrap();
+                    wait = second_arg == 0;
+                    Some(second_arg + now_u64())
                 } else {
                     None
                 };
@@ -491,12 +441,10 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                                 if let Item::StreamItem(data) = data {
                                     if target_stamp != "$" {
                                         valid_stream_id("0-0".to_string(), target_stamp.to_string())
+                                    } else if let Some(last) = data.value.last() {
+                                        last.0.to_string()
                                     } else {
-                                        if let Some(last) = data.value.last() {
-                                            last.0.to_string()
-                                        } else {
-                                            "0-0".to_string()
-                                        }
+                                        "0-0".to_string()
                                     }
                                 } else {
                                     "".to_string()
@@ -511,34 +459,29 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                     key_ids.push(key);
                     stream_ids.push(start_stamp);
                 }
-                let result = loop {
+                loop {
                     let mut final_resp = Message::arrays(&[]);
                     for k in 0..query_length {
                         if let Ok(storage) = database.storage.read() {
                             let key = key_ids.get(k).unwrap();
                             let start_stamp = stream_ids.get(k).unwrap();
-                            let mut _key_level = Message::arrays(&[Message::bulk_string(&key)]);
+                            let mut _key_level = Message::arrays(&[Message::bulk_string(key)]);
                             let stream_body = match &storage.get(&key.to_string()) {
                                 Some(data) => {
                                     if let Item::StreamItem(data) = data {
                                         let mut resp = Message::arrays(&[]);
 
                                         for i in data.value.iter() {
-                                            if parse_stream_id(&i.0) > parse_stream_id(&start_stamp)
+                                            if parse_stream_id(&i.0) > parse_stream_id(start_stamp)
                                             {
-                                                println!("{:?} > {:?}", &i.0, &start_stamp);
                                                 let mut _resp = Message::arrays(&[
                                                     Message::bulk_string(&i.0),
-                                                    Message::arrays(&[]),
+                                                    Message::arrays(
+                                                        &i.1.iter()
+                                                            .map(|x| Message::bulk_string(x))
+                                                            .collect_vec(),
+                                                    ),
                                                 ]);
-                                                for j in i.1.iter() {
-                                                    _resp
-                                                        .submessage
-                                                        .get_mut(1)
-                                                        .unwrap()
-                                                        .submessage
-                                                        .push(Message::bulk_string(j))
-                                                }
                                                 resp.submessage.push(_resp);
                                             }
                                         }
@@ -549,32 +492,27 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                                 }
                                 None => Message::null(),
                             };
-                            if stream_body.submessage.len() > 0 {
+                            if !stream_body.submessage.is_empty() {
                                 _key_level.submessage.push(stream_body);
                                 final_resp.submessage.push(_key_level);
                             }
                         }
                     }
-                    if final_resp.submessage.len() > 0 {
+                    if !final_resp.submessage.is_empty() {
                         break final_resp;
-                    } else {
-                        if let Some(timeout) = block_timeout {
-                            if !wait && now_u64() > timeout {
-                                break Message::null();
-                            } else {
-                                tokio::time::sleep(time::Duration::from_millis(50)).await;
-                            }
-                        } else {
+                    } else if let Some(timeout) = block_timeout {
+                        if !wait && now_u64() > timeout {
                             break Message::null();
+                        } else {
+                            tokio::time::sleep(time::Duration::from_millis(50)).await;
                         }
+                    } else {
+                        break Message::null();
                     }
-                };
-                // println!("writing {:?}", result);
-                result
+                }
             }
             _default => Message::null(),
         };
-        //println!("Writing {:?}", response);
         let _write_result = stream.write_message(response).await;
     }
 }
@@ -720,11 +658,12 @@ pub fn master_slave_channel(mut stream: MessageStream) -> (ReplicaHandle, JoinHa
             while let Some(upstream_message) = rx.recv().await {
                 let _ = stream.write_message(upstream_message.message).await;
                 if upstream_message.ack_timeout != 0 {
-                    if let Err(_) = tokio::time::timeout(
+                    if tokio::time::timeout(
                         time::Duration::from_millis(upstream_message.ack_timeout),
                         stream.read_message(),
                     )
                     .await
+                    .is_err()
                     {
                         let _ = tx
                             .send(ReplicaMessage {

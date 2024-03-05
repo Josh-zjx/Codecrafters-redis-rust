@@ -141,25 +141,13 @@ impl Message {
         }
     }
     pub fn operator(&self) -> Option<String> {
-        if let Some(oper) = self.submessage.first() {
-            Some(oper.message.to_lowercase())
-        } else {
-            None
-        }
+        Some(self.submessage.first()?.message.to_lowercase())
     }
     pub fn first_arg(&self) -> Option<&str> {
-        if let Some(oper) = self.submessage.get(1) {
-            Some(oper.message.as_str())
-        } else {
-            None
-        }
+        Some(self.submessage.get(1)?.message.as_str())
     }
     pub fn second_arg(&self) -> Option<&str> {
-        if let Some(oper) = self.submessage.get(2) {
-            Some(oper.message.as_str())
-        } else {
-            None
-        }
+        Some(self.submessage.get(2)?.message.as_str())
     }
 
     // Generate Message from str
