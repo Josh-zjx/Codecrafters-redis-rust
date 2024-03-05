@@ -1,7 +1,6 @@
-use core::time;
 use itertools::Itertools;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{self, SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -441,67 +440,114 @@ async fn handle_client(stream: TcpStream, database: Arc<Database>, config: Arc<S
                 }
             }
             "xread" => {
-                if request_message.first_arg().unwrap() == "streams" {
+                let block_offset = if request_message.first_arg().unwrap() == "block" {
+                    2
+                } else {
+                    0
+                };
+                let mut wait = false;
+                let block_timeout = if block_offset == 2 {
+                    wait = if request_message
+                        .second_arg()
+                        .unwrap()
+                        .parse::<u64>()
+                        .unwrap()
+                        == 0
+                    {
+                        true
+                    } else {
+                        false
+                    };
+                    Some(
+                        request_message
+                            .second_arg()
+                            .unwrap()
+                            .parse::<u64>()
+                            .unwrap()
+                            + now_u64(),
+                    )
+                } else {
+                    None
+                };
+                let result = loop {
                     let mut final_resp = Message::arrays(&[]);
-                    let query_length = (request_message.submessage.len() - 2) / 2;
+                    let query_length = (request_message.submessage.len() - 2 - block_offset) / 2;
                     for k in 0..query_length {
                         let key = request_message
                             .submessage
-                            .get(2 + k)
+                            .get(block_offset + 2 + k)
                             .unwrap()
                             .message
                             .clone();
                         let target_stamp = &request_message
                             .submessage
-                            .get(2 + query_length + k)
+                            .get(block_offset + 2 + query_length + k)
                             .unwrap()
                             .message
                             .clone();
 
-                        let storage = database.storage.read().unwrap();
-                        let mut _key_level = Message::arrays(&[Message::bulk_string(&key)]);
-                        let stream_body = match &storage.get(&key.to_string()) {
-                            Some(data) => {
-                                if let Item::StreamItem(data) = data {
-                                    let start_stamp =
-                                        valid_stream_id("0-0".to_string(), target_stamp.to_owned());
-                                    let end_stamp =
-                                        valid_stream_id("0-0".to_string(), "+".to_string());
-                                    let mut resp = Message::arrays(&[]);
+                        if let Ok(storage) = database.storage.read() {
+                            let mut _key_level = Message::arrays(&[Message::bulk_string(&key)]);
+                            let stream_body = match &storage.get(&key.to_string()) {
+                                Some(data) => {
+                                    if let Item::StreamItem(data) = data {
+                                        let start_stamp = valid_stream_id(
+                                            "0-0".to_string(),
+                                            target_stamp.to_owned(),
+                                        );
+                                        let end_stamp =
+                                            valid_stream_id("0-0".to_string(), "+".to_string());
+                                        let mut resp = Message::arrays(&[]);
 
-                                    for i in data.value.iter() {
-                                        if parse_stream_id(&i.0) >= parse_stream_id(&start_stamp)
-                                            && parse_stream_id(&i.0) <= parse_stream_id(&end_stamp)
-                                        {
-                                            let mut _resp = Message::arrays(&[
-                                                Message::bulk_string(&i.0),
-                                                Message::arrays(&[]),
-                                            ]);
-                                            for j in i.1.iter() {
-                                                _resp
-                                                    .submessage
-                                                    .get_mut(1)
-                                                    .unwrap()
-                                                    .submessage
-                                                    .push(Message::bulk_string(j))
+                                        for i in data.value.iter() {
+                                            if parse_stream_id(&i.0) > parse_stream_id(&start_stamp)
+                                                && parse_stream_id(&i.0)
+                                                    <= parse_stream_id(&end_stamp)
+                                            {
+                                                let mut _resp = Message::arrays(&[
+                                                    Message::bulk_string(&i.0),
+                                                    Message::arrays(&[]),
+                                                ]);
+                                                for j in i.1.iter() {
+                                                    _resp
+                                                        .submessage
+                                                        .get_mut(1)
+                                                        .unwrap()
+                                                        .submessage
+                                                        .push(Message::bulk_string(j))
+                                                }
+                                                resp.submessage.push(_resp);
                                             }
-                                            resp.submessage.push(_resp);
                                         }
+                                        resp
+                                    } else {
+                                        Message::null()
                                     }
-                                    resp
-                                } else {
-                                    Message::null()
                                 }
+                                None => Message::null(),
+                            };
+                            if stream_body.submessage.len() > 0 {
+                                _key_level.submessage.push(stream_body);
+                                final_resp.submessage.push(_key_level);
                             }
-                            None => Message::null(),
-                        };
-                        _key_level.submessage.push(stream_body);
-                        final_resp.submessage.push(_key_level);
+                        }
                     }
-                    final_resp
-                } else {
-                    Message::null()
-                }
+                    if final_resp.submessage.len() > 0 {
+                        break final_resp;
+                    } else {
+                        if let Some(timeout) = block_timeout {
+                            if !wait && now_u64() > timeout {
+                                break Message::null();
+                            } else {
+                                tokio::time::sleep(time::Duration::from_millis(50)).await;
+                            }
+                        } else {
+                            break Message::null();
+                        }
+                    }
+                };
+                println!("writing {:?}", result);
+                result
             }
             _default => Message::null(),
         };
