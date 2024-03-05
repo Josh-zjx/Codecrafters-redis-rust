@@ -35,11 +35,9 @@ fn valid_stream_id(prev: String, curr: String) -> String {
     if curr == "-" {
         return format!("{}-{}", 0, 0);
     };
-    /*
-        if curr == "+" {
-            return format!("{}-{}", u64::MAX, u64::MAX);
-        };
-    */
+    if curr == "+" {
+        return format!("{}-{}", u64::MAX, u64::MAX);
+    };
     let curr = if !curr.contains("-") {
         format!("{}-*", curr)
     } else {
