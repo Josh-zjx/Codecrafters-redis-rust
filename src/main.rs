@@ -10,6 +10,7 @@ mod message;
 mod rdb;
 mod stream;
 use crate::config::*;
+const DATARACE_PATCH: bool = false;
 fn now_u64() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -540,27 +541,29 @@ async fn main() {
         handlers.push(handler);
 
         if let Ok(mut storage) = database_ref.storage.write() {
-            storage.insert(
-                "foo".to_string(),
-                Item::KvItem(KvItem {
-                    value: "123".to_string(),
-                    expire: 0,
-                }),
-            );
-            storage.insert(
-                "bar".to_string(),
-                Item::KvItem(KvItem {
-                    value: "456".to_string(),
-                    expire: 0,
-                }),
-            );
-            storage.insert(
-                "baz".to_string(),
-                Item::KvItem(KvItem {
-                    value: "789".to_string(),
-                    expire: 0,
-                }),
-            );
+            if DATARACE_PATCH {
+                storage.insert(
+                    "foo".to_string(),
+                    Item::KvItem(KvItem {
+                        value: "123".to_string(),
+                        expire: 0,
+                    }),
+                );
+                storage.insert(
+                    "bar".to_string(),
+                    Item::KvItem(KvItem {
+                        value: "456".to_string(),
+                        expire: 0,
+                    }),
+                );
+                storage.insert(
+                    "baz".to_string(),
+                    Item::KvItem(KvItem {
+                        value: "789".to_string(),
+                        expire: 0,
+                    }),
+                );
+            }
         };
         println!("Returning to normal operations");
         loop {
