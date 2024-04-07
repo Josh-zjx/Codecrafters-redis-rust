@@ -1,6 +1,6 @@
-name: automated-test
-run-name: cargo test
-on: [push]
+name: test suite
+on: [push, pull_request]
+
 jobs:
   test:
     name: cargo test
