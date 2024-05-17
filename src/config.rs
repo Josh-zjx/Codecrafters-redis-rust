@@ -18,7 +18,7 @@ pub struct Opt {
     pub _port: u32,
 
     #[structopt(long, parse(from_str))]
-    pub _replicaof: Option<Vec<String>>,
+    pub _replicaof: Option<String>,
 }
 pub struct ServerConfig {
     pub port: String,
@@ -46,10 +46,16 @@ impl ServerConfig {
             dir: opt._dir.to_string_lossy().to_string(),
             dbfilename: opt._dbfilename.to_string_lossy().to_string(),
             is_master: opt._replicaof.is_none(),
-            master_ip_port: opt
-                ._replicaof
-                .as_ref()
-                .map(|master| format!("{}:{}", master.first().unwrap(), master.get(1).unwrap())),
+
+            // NOTE: The format of the input has changed
+            // TODO: implement handler for input with quotes or not
+            master_ip_port: match opt._replicaof.clone() {
+                Some(replicaof) => {
+                    let sp: Vec<_> = replicaof.split(" ").collect();
+                    Some(format!("{}:{}", sp.first().unwrap(), sp.get(1).unwrap()))
+                }
+                None => None,
+            },
             master_id: rand::thread_rng()
                 .sample_iter(&Alphanumeric)
                 .take(40)
