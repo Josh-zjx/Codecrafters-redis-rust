@@ -696,3 +696,95 @@ pub fn master_slave_channel(mut stream: MessageStream) -> (ReplicaHandle, JoinHa
         _handler,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_now_u64_returns_positive() {
+        let timestamp = now_u64();
+        // Should be a positive timestamp (after Unix epoch)
+        assert!(timestamp > 0);
+    }
+
+    #[test]
+    fn test_now_u64_increases_over_time() {
+        let t1 = now_u64();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let t2 = now_u64();
+        // Time should increase or stay same (with millisecond precision)
+        assert!(t2 >= t1);
+    }
+
+    #[test]
+    fn test_parse_stream_id_basic() {
+        let result = parse_stream_id("1000-1");
+        assert_eq!(result, (1000, 1));
+    }
+
+    #[test]
+    fn test_parse_stream_id_zero() {
+        let result = parse_stream_id("0-0");
+        assert_eq!(result, (0, 0));
+    }
+
+    #[test]
+    fn test_parse_stream_id_large_values() {
+        let result = parse_stream_id("1234567890-9876543210");
+        assert_eq!(result, (1234567890, 9876543210));
+    }
+
+    #[test]
+    fn test_valid_stream_id_explicit_id() {
+        let result = valid_stream_id("0-0".to_string(), "1000-5".to_string());
+        assert_eq!(result, "1000-5");
+    }
+
+    #[test]
+    fn test_valid_stream_id_dollar_returns_prev() {
+        let result = valid_stream_id("100-5".to_string(), "$".to_string());
+        assert_eq!(result, "100-5");
+    }
+
+    #[test]
+    fn test_valid_stream_id_minus_returns_zero() {
+        let result = valid_stream_id("100-5".to_string(), "-".to_string());
+        assert_eq!(result, "0-0");
+    }
+
+    #[test]
+    fn test_valid_stream_id_plus_returns_max() {
+        let result = valid_stream_id("100-5".to_string(), "+".to_string());
+        assert_eq!(result, format!("{}-{}", u64::MAX, u64::MAX));
+    }
+
+    #[test]
+    fn test_valid_stream_id_wildcard_greater_time() {
+        // When curr time > prev time, sequence should be 0
+        let result = valid_stream_id("100-5".to_string(), "200-*".to_string());
+        assert_eq!(result, "200-0");
+    }
+
+    #[test]
+    fn test_valid_stream_id_wildcard_same_time() {
+        // When curr time == prev time, sequence should be prev + 1
+        let result = valid_stream_id("100-5".to_string(), "100-*".to_string());
+        assert_eq!(result, "100-6");
+    }
+
+    #[test]
+    fn test_valid_stream_id_wildcard_lesser_time() {
+        // When curr time < prev time, sequence should be prev sequence
+        let result = valid_stream_id("200-5".to_string(), "100-*".to_string());
+        assert_eq!(result, "100-5");
+    }
+
+    #[test]
+    fn test_valid_stream_id_time_only() {
+        // When only time provided (no dash), should add -* wildcard
+        let result = valid_stream_id("0-0".to_string(), "1000".to_string());
+        // Since 1000 > 0, should result in 1000-0
+        assert_eq!(result, "1000-0");
+    }
+}

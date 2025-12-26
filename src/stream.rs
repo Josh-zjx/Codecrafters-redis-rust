@@ -138,4 +138,57 @@ mod test {
             Message::read_simple(&mes.to_string().as_bytes(), &mut index)
         )
     }
+
+    #[test]
+    fn test_read_simple_ok() {
+        let data = b"+OK\r\n";
+        let mut index = 0;
+        let result = Message::read_simple(data, &mut index);
+        assert_eq!(result, Message::simple_string("OK"));
+        assert_eq!(index, 5);
+    }
+
+    #[test]
+    fn test_read_simple_pong() {
+        let data = b"+PONG\r\n";
+        let mut index = 0;
+        let result = Message::read_simple(data, &mut index);
+        assert_eq!(result, Message::simple_string("PONG"));
+        assert_eq!(index, 7);
+    }
+
+    #[test]
+    fn test_read_simple_empty() {
+        let data = b"+\r\n";
+        let mut index = 0;
+        let result = Message::read_simple(data, &mut index);
+        assert_eq!(result, Message::simple_string(""));
+        assert_eq!(index, 3);
+    }
+
+    #[test]
+    fn test_read_simple_with_spaces() {
+        let data = b"+Hello World\r\n";
+        let mut index = 0;
+        let result = Message::read_simple(data, &mut index);
+        assert_eq!(result, Message::simple_string("Hello World"));
+        assert_eq!(index, 14);
+    }
+
+    #[test]
+    fn test_read_bulk_hello() {
+        let data = b"$5\r\nHello\r\n";
+        let mut index = 0;
+        let result = Message::read_bulk(data, &mut index);
+        assert_eq!(result, Message::bulk_string("Hello"));
+        assert_eq!(index, 11);
+    }
+
+    #[test]
+    fn test_read_bulk_with_special_chars() {
+        let data = b"$11\r\nHello World\r\n";
+        let mut index = 0;
+        let result = Message::read_bulk(data, &mut index);
+        assert_eq!(result, Message::bulk_string("Hello World"));
+    }
 }

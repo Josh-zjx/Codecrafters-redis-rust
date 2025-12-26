@@ -177,3 +177,137 @@ impl Default for Database {
         Database::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_database_new() {
+        let db = Database::new();
+        assert_eq!(db._db_selector, 0);
+        assert!(db.storage.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_database_default() {
+        let db = Database::default();
+        assert_eq!(db._db_selector, 0);
+        assert!(db.storage.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_fullresync_rdb_format() {
+        let rdb_data = Database::fullresync_rdb();
+        // Should start with the RDB length prefix in RESP format
+        assert!(rdb_data.starts_with(b"$88\r\n"));
+        // Total length should be 88 bytes of RDB data + prefix
+        assert_eq!(rdb_data.len(), 88 + 5); // "$88\r\n".len() = 5
+    }
+
+    #[test]
+    fn test_fullresync_rdb_contains_redis_header() {
+        let rdb_data = Database::fullresync_rdb();
+        // RDB file should start with REDIS magic string after the RESP prefix
+        let redis_magic = b"REDIS";
+        assert!(rdb_data[5..10] == *redis_magic);
+    }
+
+    #[test]
+    fn test_parse_length_encoding_small_value() {
+        let db = Database::new();
+        // Test small value (< 64)
+        let data = [10u8]; // Length 10
+        let result = db.parse_length_encoding(&data, 0);
+        assert_eq!(result, Some((1, 10)));
+    }
+
+    #[test]
+    fn test_parse_length_encoding_zero() {
+        let db = Database::new();
+        let data = [0u8]; // Length 0
+        let result = db.parse_length_encoding(&data, 0);
+        assert_eq!(result, Some((1, 0)));
+    }
+
+    #[test]
+    fn test_parse_length_encoding_max_small() {
+        let db = Database::new();
+        let data = [63u8]; // Max value for small encoding
+        let result = db.parse_length_encoding(&data, 0);
+        assert_eq!(result, Some((1, 63)));
+    }
+
+    #[test]
+    fn test_parse_length_encoding_empty_slice() {
+        let db = Database::new();
+        let data: [u8; 0] = [];
+        let result = db.parse_length_encoding(&data, 0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_length_encoding_index_out_of_bounds() {
+        let db = Database::new();
+        let data = [10u8];
+        let result = db.parse_length_encoding(&data, 5);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_length_encoding_large_value() {
+        let db = Database::new();
+        // Value >= 64 should return None (not implemented)
+        let data = [64u8];
+        let result = db.parse_length_encoding(&data, 0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_read_header_empty() {
+        let db = Database::new();
+        let data: [u8; 0] = [];
+        let result = db.read_header(&data);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_read_header_no_fe_marker() {
+        let db = Database::new();
+        // Data without 0xFE marker
+        let data = [0x52, 0x45, 0x44, 0x49, 0x53]; // "REDIS"
+        let result = db.read_header(&data);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_read_data_terminal_check() {
+        let db = Database::new();
+        // Data starting with terminal marker 0xFF
+        let data = [0xFF];
+        let result = db.read_data(&data, 0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_read_data_out_of_bounds() {
+        let db = Database::new();
+        let data = [0x00, 0x01, 0x02];
+        let result = db.read_data(&data, 10);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_load_data_empty() {
+        let db = Database::new();
+        db.load_data(&[]);
+        assert!(db.storage.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_database_read_rdb_from_nonexistent_file() {
+        let db = Database::read_rdb_from_file("/nonexistent/path/file.rdb".to_string());
+        // Should return empty database when file doesn't exist
+        assert!(db.storage.read().unwrap().is_empty());
+    }
+}

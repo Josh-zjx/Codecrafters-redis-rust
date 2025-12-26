@@ -317,4 +317,346 @@ mod tests {
             Message::from_str(test_message.to_string().as_str()).unwrap()
         )
     }
+
+    #[test]
+    fn test_error_message() {
+        assert_eq!(
+            Message {
+                message_type: MessageType::Error,
+                message: "ERR unknown command".to_string(),
+                submessage: vec![]
+            },
+            Message::error("ERR unknown command")
+        );
+    }
+
+    #[test]
+    fn test_error_message_as_bytes() {
+        assert_eq!(
+            Message::error("ERR unknown command").to_string().as_bytes(),
+            b"-ERR unknown command\r\n"
+        );
+    }
+
+    #[test]
+    fn test_integer_message() {
+        assert_eq!(
+            Message {
+                message_type: MessageType::Integer,
+                message: "42".to_string(),
+                submessage: vec![]
+            },
+            Message::integer(42)
+        );
+    }
+
+    #[test]
+    fn test_integer_message_as_bytes() {
+        assert_eq!(
+            Message::integer(100).to_string().as_bytes(),
+            b":100\r\n"
+        );
+    }
+
+    #[test]
+    fn test_integer_zero() {
+        assert_eq!(
+            Message::integer(0).to_string().as_bytes(),
+            b":0\r\n"
+        );
+    }
+
+    #[test]
+    fn test_read_bulk_basic() {
+        let data = b"$4\r\ntest\r\n";
+        let mut index = 0;
+        let result = Message::read_bulk(data, &mut index);
+        assert_eq!(result, Message::bulk_string("test"));
+        assert_eq!(index, 10); // Should advance past the entire message
+    }
+
+    #[test]
+    fn test_read_bulk_empty_string() {
+        let data = b"$0\r\n\r\n";
+        let mut index = 0;
+        let result = Message::read_bulk(data, &mut index);
+        assert_eq!(result, Message::bulk_string(""));
+    }
+
+    #[test]
+    fn test_read_simple_basic() {
+        let data = b"+PONG\r\n";
+        let mut index = 0;
+        let result = Message::read_simple(data, &mut index);
+        assert_eq!(result, Message::simple_string("PONG"));
+        assert_eq!(index, 7); // Should advance past the entire message
+    }
+
+    #[test]
+    fn test_read_array_basic() {
+        let data = b"*2\r\n$4\r\nECHO\r\n$5\r\nhello\r\n";
+        let mut index = 0;
+        let result = Message::read_array(data, &mut index);
+        assert_eq!(
+            result,
+            Message::arrays(&[
+                Message::bulk_string("ECHO"),
+                Message::bulk_string("hello")
+            ])
+        );
+    }
+
+    #[test]
+    fn test_read_array_empty() {
+        let data = b"*0\r\n";
+        let mut index = 0;
+        let result = Message::read_array(data, &mut index);
+        assert_eq!(result, Message::arrays(&[]));
+    }
+
+    #[test]
+    fn test_read_array_nested() {
+        let data = b"*1\r\n*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n";
+        let mut index = 0;
+        let result = Message::read_array(data, &mut index);
+        assert_eq!(
+            result,
+            Message::arrays(&[Message::arrays(&[
+                Message::bulk_string("foo"),
+                Message::bulk_string("bar")
+            ])])
+        );
+    }
+
+    #[test]
+    fn test_operator() {
+        let msg = Message::arrays(&[
+            Message::bulk_string("GET"),
+            Message::bulk_string("key1"),
+        ]);
+        assert_eq!(msg.operator(), Some("get".to_string()));
+    }
+
+    #[test]
+    fn test_operator_empty_array() {
+        let msg = Message::arrays(&[]);
+        assert_eq!(msg.operator(), None);
+    }
+
+    #[test]
+    fn test_first_arg() {
+        let msg = Message::arrays(&[
+            Message::bulk_string("GET"),
+            Message::bulk_string("mykey"),
+        ]);
+        assert_eq!(msg.first_arg(), Some("mykey"));
+    }
+
+    #[test]
+    fn test_first_arg_missing() {
+        let msg = Message::arrays(&[Message::bulk_string("PING")]);
+        assert_eq!(msg.first_arg(), None);
+    }
+
+    #[test]
+    fn test_second_arg() {
+        let msg = Message::arrays(&[
+            Message::bulk_string("SET"),
+            Message::bulk_string("key"),
+            Message::bulk_string("value"),
+        ]);
+        assert_eq!(msg.second_arg(), Some("value"));
+    }
+
+    #[test]
+    fn test_second_arg_missing() {
+        let msg = Message::arrays(&[
+            Message::bulk_string("GET"),
+            Message::bulk_string("key"),
+        ]);
+        assert_eq!(msg.second_arg(), None);
+    }
+
+    #[test]
+    fn test_empty_bulk_string() {
+        let msg = Message::bulk_string("");
+        assert_eq!(msg.to_string().as_bytes(), b"$0\r\n\r\n");
+    }
+
+    #[test]
+    fn test_arrays_as_bytes() {
+        let msg = Message::arrays(&[
+            Message::bulk_string("SET"),
+            Message::bulk_string("key"),
+        ]);
+        assert_eq!(
+            msg.to_string().as_bytes(),
+            b"*2\r\n$3\r\nSET\r\n$3\r\nkey\r\n"
+        );
+    }
+
+    #[test]
+    fn test_empty_arrays() {
+        let msg = Message::arrays(&[]);
+        assert_eq!(msg.to_string().as_bytes(), b"*0\r\n");
+    }
+
+    #[test]
+    fn test_operator_case_insensitive() {
+        let msg = Message::arrays(&[
+            Message::bulk_string("PING"),
+        ]);
+        assert_eq!(msg.operator(), Some("ping".to_string()));
+    }
+
+    #[test]
+    fn test_read_array_with_simple_strings() {
+        let data = b"*2\r\n+OK\r\n$4\r\ntest\r\n";
+        let mut index = 0;
+        let result = Message::read_array(data, &mut index);
+        assert_eq!(
+            result,
+            Message::arrays(&[
+                Message::simple_string("OK"),
+                Message::bulk_string("test")
+            ])
+        );
+    }
+
+    // Tests for data structures
+    #[test]
+    fn test_kv_item_equality() {
+        let item1 = KvItem {
+            value: "test".to_string(),
+            expire: 0,
+        };
+        let item2 = KvItem {
+            value: "test".to_string(),
+            expire: 0,
+        };
+        assert_eq!(item1, item2);
+    }
+
+    #[test]
+    fn test_kv_item_inequality_value() {
+        let item1 = KvItem {
+            value: "test1".to_string(),
+            expire: 0,
+        };
+        let item2 = KvItem {
+            value: "test2".to_string(),
+            expire: 0,
+        };
+        assert_ne!(item1, item2);
+    }
+
+    #[test]
+    fn test_kv_item_inequality_expire() {
+        let item1 = KvItem {
+            value: "test".to_string(),
+            expire: 0,
+        };
+        let item2 = KvItem {
+            value: "test".to_string(),
+            expire: 1000,
+        };
+        assert_ne!(item1, item2);
+    }
+
+    #[test]
+    fn test_kv_item_clone() {
+        let item1 = KvItem {
+            value: "test".to_string(),
+            expire: 1000,
+        };
+        let item2 = item1.clone();
+        assert_eq!(item1, item2);
+    }
+
+    #[test]
+    fn test_stream_item_empty() {
+        let item = StreamItem { value: vec![] };
+        assert!(item.value.is_empty());
+    }
+
+    #[test]
+    fn test_stream_item_with_data() {
+        let item = StreamItem {
+            value: vec![("1000-1".to_string(), vec!["key".to_string(), "value".to_string()])],
+        };
+        assert_eq!(item.value.len(), 1);
+        assert_eq!(item.value[0].0, "1000-1");
+    }
+
+    #[test]
+    fn test_stream_item_equality() {
+        let item1 = StreamItem {
+            value: vec![("1000-1".to_string(), vec!["a".to_string()])],
+        };
+        let item2 = StreamItem {
+            value: vec![("1000-1".to_string(), vec!["a".to_string()])],
+        };
+        assert_eq!(item1, item2);
+    }
+
+    #[test]
+    fn test_item_enum_kv() {
+        let kv = KvItem {
+            value: "test".to_string(),
+            expire: 0,
+        };
+        let item = Item::KvItem(kv.clone());
+        match item {
+            Item::KvItem(inner) => assert_eq!(inner, kv),
+            Item::StreamItem(_) => panic!("Expected KvItem"),
+        }
+    }
+
+    #[test]
+    fn test_item_enum_stream() {
+        let stream = StreamItem { value: vec![] };
+        let item = Item::StreamItem(stream.clone());
+        match item {
+            Item::StreamItem(inner) => assert_eq!(inner, stream),
+            Item::KvItem(_) => panic!("Expected StreamItem"),
+        }
+    }
+
+    #[test]
+    fn test_message_type_equality() {
+        assert_eq!(MessageType::SimpleString, MessageType::SimpleString);
+        assert_eq!(MessageType::BulkString, MessageType::BulkString);
+        assert_eq!(MessageType::Arrays, MessageType::Arrays);
+        assert_eq!(MessageType::Null, MessageType::Null);
+        assert_eq!(MessageType::Integer, MessageType::Integer);
+        assert_eq!(MessageType::Error, MessageType::Error);
+    }
+
+    #[test]
+    fn test_message_type_inequality() {
+        assert_ne!(MessageType::SimpleString, MessageType::BulkString);
+        assert_ne!(MessageType::Arrays, MessageType::Null);
+    }
+
+    #[test]
+    fn test_replica_message_clone() {
+        let msg = ReplicaMessage {
+            message: Message::simple_string("test"),
+            ack_timeout: 100,
+        };
+        let cloned = msg.clone();
+        assert_eq!(cloned.message, msg.message);
+        assert_eq!(cloned.ack_timeout, msg.ack_timeout);
+    }
+
+    #[test]
+    fn test_message_clone() {
+        let msg = Message::arrays(&[
+            Message::bulk_string("SET"),
+            Message::bulk_string("key"),
+            Message::bulk_string("value"),
+        ]);
+        let cloned = msg.clone();
+        assert_eq!(msg, cloned);
+    }
 }
